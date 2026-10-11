@@ -1,0 +1,22 @@
+{
+  "repositoryUrl": "https://github.com/eternity4719/HowToLiveBetter",
+  "commitSha": "a994b6a0c90598b0fe15cb837343f438dbf7b95d",
+  "capturedAt": "2026-10-09",
+  "chapterCount": 34,
+  "entryCount": 675,
+  "contentLicense": {
+    "name": "CC BY 4.0",
+    "url": "https://creativecommons.org/licenses/by/4.0/"
+  },
+  "translation": {
+    "repositoryUrl": "https://github.com/parveen0029/The-Evidence-Based-Life",
+    "commitSha": "be53472dac6ac15b6c548b20ca0c2f753e6d22a0",
+    "capturedAt": "2026-10-09",
+    "reportedEntryCount": 649,
+    "license": {
+      "name": "CC BY 4.0",
+      "url": "https://creativecommons.org/licenses/by/4.0/"
+    },
+    "maintainer": "parveen0029"
+  }
+}

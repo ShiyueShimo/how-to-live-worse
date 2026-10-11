@@ -1,0 +1,44 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx",
+    "incremental": true,
+    "types": ["vite/client"],
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": [
+    "src/config/**/*.ts",
+    "src/content/guide/**/*.ts",
+    "src/content/library/**/*.ts",
+    "src/routes/**/*.ts",
+    "src/routes/**/*.tsx",
+    "src/components/guide-*.ts",
+    "src/components/guide-*.tsx",
+    "src/core/i18n/**/*.ts",
+    "src/lib/cookie.ts",
+    "src/lib/env.ts",
+    "src/lib/guide-*.ts",
+    "src/paraglide/**/*.ts",
+    "src/routeTree.gen.ts",
+    "src/router.tsx",
+    "src/server.ts",
+    "tests/**/*.test.ts",
+    "scripts/import-guide.ts",
+    "scripts/validate-guide-content.ts",
+    "scripts/export-guide.ts",
+    "scripts/validate-exports.ts",
+    "vite.config.ts"
+  ],
+  "exclude": ["node_modules", ".output", ".nitro", ".tanstack"]
+}
