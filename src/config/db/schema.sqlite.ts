@@ -34,6 +34,14 @@ export const user = table(
     utmSource: text('utm_source').notNull().default(''),
     ip: text('ip').notNull().default(''),
     locale: text('locale').notNull().default(''),
+    utmCampaign: text('utm_campaign').notNull().default(''),
+    utmTerm: text('utm_term').notNull().default(''),
+    utmMedium: text('utm_medium').notNull().default(''),
+    utmContent: text('utm_content').notNull().default(''),
+    referrer: text('referrer').notNull().default(''),
+    country: text('country').notNull().default(''),
+    // 'user' = a person; 'api' = an agent/service account (no login, keys only).
+    type: text('type').notNull().default('user'),
   },
   (table) => [
     index('idx_user_name').on(table.name),
@@ -237,6 +245,9 @@ export const order = table(
     transactionId: text('transaction_id'),
     paymentUserName: text('payment_user_name'),
     paymentUserId: text('payment_user_id'),
+    refundAmount: integer('refund_amount'),
+    refundedAt: integer('refunded_at', { mode: 'timestamp_ms' }),
+    refundResult: text('refund_result'),
   },
   (table) => [
     index('idx_order_user_status_payment_type').on(
@@ -373,6 +384,9 @@ export const apikey = table(
       .$onUpdate(() => new Date())
       .notNull(),
     deletedAt: integer('deleted_at', { mode: 'timestamp_ms' }),
+    // 'user' = product API key (sk_); 'admin' = admin/agent API key (sa_admin_).
+    type: text('type').notNull().default('user'),
+    expiresAt: integer('expires_at', { mode: 'timestamp_ms' }), // null = never expires
   },
   (table) => [
     index('idx_apikey_user_status').on(table.userId, table.status),
@@ -697,3 +711,49 @@ export type InviteCode = typeof inviteCode.$inferSelect;
 export type NewInviteCode = typeof inviteCode.$inferInsert;
 export type UserInvite = typeof userInvite.$inferSelect;
 export type NewUserInvite = typeof userInvite.$inferInsert;
+
+// Agent administration: durable execution journal. Agents are `user.type = 'api'`
+// accounts whose credentials are `apikey.type = 'admin'` rows; tokenId → apikey.id.
+export const adminExecution = table(
+  'admin_execution',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id').notNull(),
+    tokenId: text('token_id'),
+    operation: text('operation').notNull(),
+    inputHash: text('input_hash').notNull(),
+    targetId: text('target_id'),
+    status: text('status').notNull(),
+    response: text('response'),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+    completedAt: integer('completed_at', { mode: 'timestamp_ms' }),
+  },
+  (t) => [index('idx_admin_execution_created').on(t.createdAt)]
+);
+
+export type AdminExecution = typeof adminExecution.$inferSelect;
+
+// Product events (paywall hits, plan picks, risk flags …) that no other table
+// records. Kinds are registered in src/config/events.ts; written through
+// recordEvent() (server) or track() (client, registered kinds only). Shown in
+// the admin user timeline next to orders, credits and tasks.
+export const userEvent = table(
+  'user_event',
+  {
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    kind: text('kind').notNull(),
+    detail: text('detail'),
+    source: text('source').notNull(), // server | client
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (t) => [
+    index('idx_user_event_user_created').on(t.userId, t.createdAt),
+    index('idx_user_event_kind_created').on(t.kind, t.createdAt),
+  ]
+);
+
+export type UserEvent = typeof userEvent.$inferSelect;
+export type NewUserEvent = typeof userEvent.$inferInsert;

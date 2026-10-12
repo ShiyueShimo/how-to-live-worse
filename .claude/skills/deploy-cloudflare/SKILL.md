@@ -176,8 +176,10 @@ Ask the user for their Postgres connection string if it's not already in `.env.d
 
 ```bash
 # pipe, don't paste into argv history where avoidable; name defaults to the worker name
-npx wrangler hyperdrive create <worker-name> --connection-string="$DATABASE_URL"
+npx wrangler hyperdrive create <worker-name> --connection-string="$DATABASE_URL" --caching-disabled=true
 ```
+
+`--caching-disabled=true` is recommended: Hyperdrive's query cache can serve reads up to 60 s stale (order status, credit balance, admin settings) — for a SaaS, correctness beats the cache. Connection pooling, the part that matters for latency, stays on.
 
 Capture the `id` from stdout. Narrate: "Hyperdrive created: `<name>` (id: `<id>`)". If it errors with "could not connect", the PG isn't reachable from Cloudflare — surface the error and stop (common causes: IP allowlist, no TLS, non-5432 port blocked).
 
@@ -192,8 +194,9 @@ Edit `wrangler.jsonc`:
 - `vars.DATABASE_PROVIDER` ← `"postgresql"` (this also tells vite.config.ts to keep the postgres driver in the Worker bundle)
 - REMOVE the `d1_databases` block
 - ADD: `"hyperdrive": [{ "binding": "HYPERDRIVE", "id": "<id from step 2>" }]`
+- Keep the pinned `compatibility_date` from the example (add one if an older working copy lacks it)
 
-Do NOT put `DATABASE_URL` in `vars` (vars are public). The runtime reads the connection string from the Hyperdrive binding; `DATABASE_URL` is only needed as a **secret** fallback if the user insists on running without Hyperdrive (discouraged): `grep "^DATABASE_URL=" .env.development | cut -d= -f2- | npx wrangler secret put DATABASE_URL`.
+Do NOT put `DATABASE_URL` in `vars` (vars are public). It isn't needed at runtime: the code recognizes the HYPERDRIVE binding as a configured database (`hasDatabaseConfigured()` in `src/core/db/runtime.ts`, used by both the drivers and the settings loader) and reads the connection string from it. `DATABASE_URL` is only needed as a **secret** fallback if the user insists on running without Hyperdrive (discouraged): `grep "^DATABASE_URL=" .env.development | cut -d= -f2- | npx wrangler secret put DATABASE_URL`.
 
 ### 4. Schema + RBAC directly against PG (auto, replaces Phases 4 & 4.5)
 
@@ -333,7 +336,15 @@ curl -sS --noproxy '*' -o /dev/null -w "/    HTTP=%{http_code} TIME=%{time_total
 curl -sS --noproxy '*' -o /dev/null -w "/api  HTTP=%{http_code}\n" "$URL/api/config/public"
 ```
 
-Both 200 → report success with the live URL. Any 500 → one-shot `npx wrangler tail` to capture the first error (print the command for the user too, don't keep it running).
+Both 200 → then check that the admin settings are actually being read — HTTP 200 alone is not enough:
+
+```bash
+curl -sS --noproxy '*' "$URL/api/config/public" | head -c 600
+```
+
+If admin has configured anything (payments, OAuth…), its switches (e.g. `stripe_enabled`, `google_auth_enabled`) must appear in the response. Only the default keys (`app_name`, `app_logo`, …) means the config table wasn't read — treat the deploy as failed and check `npx wrangler tail` for `[config]` log lines (Postgres mode: is the `HYPERDRIVE` binding present?). On a brand-new install with nothing configured yet, defaults-only is expected.
+
+Then report success with the live URL. Any 500 → one-shot `npx wrangler tail` to capture the first error (print the command for the user too, don't keep it running).
 
 ## Phase 9: First super_admin (optional — Interruption #3)
 
@@ -404,7 +415,10 @@ Just the `INSERT OR IGNORE ... SELECT` + verify from above. 0 rows → user hasn
 | `/admin` 403 after Phase 9 | Stale session claims | Sign out and back in |
 | Runtime throws "This DB driver was stubbed out of the Cloudflare Workers build" | `wrangler.jsonc` `vars.DATABASE_PROVIDER` was changed AFTER the last build (vite.config.ts bakes the driver choice at build time) | Rebuild + redeploy (`pnpm run cf:deploy`) so the bundle matches the provider |
 | Postgres mode: every query fails with connection errors but `wrangler hyperdrive create` succeeded | `hyperdrive` binding missing from `wrangler.jsonc`, or binding name ≠ `HYPERDRIVE` | `src/core/db/postgres.ts` expects binding name exactly `HYPERDRIVE`; fix wrangler.jsonc and redeploy |
-| Postgres mode: intermittent `Cannot perform I/O on behalf of a different request` | A postgres client got cached across requests (e.g. someone re-added a module-level cache for TCP drivers) | `src/core/db/index.ts` deliberately skips the singleton cache for postgres/mysql on Workers — restore that behavior |
+| Postgres mode: intermittent `Cannot perform I/O on behalf of a different request` | A postgres client got cached across requests (e.g. someone re-added a module-level cache for TCP drivers) | On Workers, `db()` caches postgres/mysql clients **per request** (`src/core/db/request-scope.ts`, scope opened in `src/server.ts`), never in a module-level variable — restore that behavior |
+| Postgres mode: payments say "No payment provider configured", OAuth/R2/email silently off, but pages load | Admin settings not being read from the config table | Check `npx wrangler tail` for `[config]` lines; confirm the `HYPERDRIVE` binding is in `wrangler.jsonc` (settings loader uses `hasDatabaseConfigured()`) |
+| Deploy fails `Can't set compatibility date in the future [code: 10021]` | `compatibility_date` unset — nitro fills in the build machine's local date, which can be a day ahead of UTC | Pin `"compatibility_date"` in `wrangler.jsonc` (the example ships one) |
+| Outbound API returns 403/400 only on Workers (GitHub, WeChat Pay) | Workers' `fetch` sends no `User-Agent` | `src/server.ts` adds a default UA to outbound requests on Workers; set an explicit `User-Agent` on new integrations that require one |
 | `wrangler hyperdrive create` fails with connection error | Postgres unreachable from Cloudflare: IP allowlist, no TLS, or blocked port | Allow Cloudflare egress / enable TLS on the DB; for Neon/Supabase use the direct (non-pooler) connection string |
 
 ## What this skill never does

@@ -136,3 +136,6 @@ Do NOT push — let the user review first.
    fixes discovered here or in shipany-vinext) are re-implemented in
    shipany-next first.
 6. **Both `pnpm build` and `pnpm cf:build` must pass** before declaring done.
+7. **Write `UPGRADING.md` entries** for anything a downstream project must act
+   on: schema, env vars, permission codes, renamed exports, user-visible
+   behavior. Downstream agents follow that file when they pull this repo.

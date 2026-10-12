@@ -7,8 +7,11 @@ import {
   PaymentEventType,
   PaymentOrder,
   PaymentProvider,
+  PaymentRefund,
+  PaymentRefundRequest,
   PaymentSession,
   PaymentStatus,
+  RefundStatus,
 } from './types';
 
 /**
@@ -51,6 +54,13 @@ export class WechatPayProvider implements PaymentProvider {
   }): Promise<CheckoutSession> {
     if (!order.price) {
       throw new Error('Price is required for WeChat payment');
+    }
+    // WeChat only charges CNY; sending a USD amount would bill the same number
+    // in yuan (149 USD → ¥149), so refuse anything that isn't priced in CNY.
+    if (order.price.currency?.toLowerCase() !== 'cny') {
+      throw new Error(
+        `WeChat only supports CNY, got ${order.price.currency || 'none'}`
+      );
     }
 
     const outTradeNo = order.orderNo || `WX${Date.now()}`;
@@ -186,6 +196,12 @@ export class WechatPayProvider implements PaymentProvider {
     // Decrypt the notification resource using AES-256-GCM
     const decrypted = this.decryptResource(resource);
     const trade = JSON.parse(decrypted);
+    if (
+      trade.mchid !== this.configs.mchId ||
+      trade.appid !== this.configs.appId
+    ) {
+      throw new Error('WeChat Pay notification is for a different merchant');
+    }
 
     const eventType =
       notification.event_type === 'TRANSACTION.SUCCESS'
@@ -212,6 +228,39 @@ export class WechatPayProvider implements PaymentProvider {
       eventType,
       eventResult: notification,
       paymentSession,
+    };
+  }
+
+  /**
+   * Full refund. out_refund_no makes retries idempotent on WeChat's side.
+   * @docs https://pay.weixin.qq.com/doc/v3/merchant/4012791862
+   */
+  async refundPayment(request: PaymentRefundRequest): Promise<PaymentRefund> {
+    const result = await this.request('POST', '/v3/refund/domestic/refunds', {
+      ...(request.transactionId
+        ? { transaction_id: request.transactionId }
+        : { out_trade_no: request.sessionId || request.orderNo }),
+      out_refund_no: `refund_${request.orderNo}`.slice(0, 64),
+      ...(request.reason ? { reason: request.reason.slice(0, 80) } : {}),
+      amount: {
+        refund: request.amount,
+        total: request.amount,
+        currency: 'CNY',
+      },
+    });
+
+    if (result.status === 'CLOSED' || result.status === 'ABNORMAL') {
+      throw new Error(`WeChat refund ${result.status.toLowerCase()}`);
+    }
+
+    return {
+      refundId: result.refund_id,
+      status:
+        result.status === 'SUCCESS'
+          ? RefundStatus.SUCCEEDED
+          : RefundStatus.PENDING,
+      amount: result.amount?.refund,
+      refundResult: result,
     };
   }
 
@@ -242,6 +291,9 @@ export class WechatPayProvider implements PaymentProvider {
         'Content-Type': 'application/json',
         Accept: 'application/json',
         Authorization: authorization,
+        // Required by WeChat Pay v3 ("Http头缺少Accept或User-Agent" otherwise);
+        // Cloudflare Workers' fetch doesn't send one by default.
+        'User-Agent': 'ShipAny-WechatPay/1.0',
       },
       body: body ? bodyStr : undefined,
     });

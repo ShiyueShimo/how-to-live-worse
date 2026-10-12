@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm';
 
-import { db } from '@/core/db';
+import { db, hasDatabaseConfigured, isCloudflareWorker } from '@/core/db';
 import { envConfigs } from '@/config';
 import { config } from '@/config/db/schema';
 import { decryptSecret, encryptSecret, isEncryptedSecret } from '@/lib/crypto';
@@ -12,7 +12,12 @@ export type ConfigMap = Record<string, string>;
 // In-memory cache
 let cachedConfigs: ConfigMap | null = null;
 let cacheTime = 0;
-const CACHE_TTL = 3600_000; // 1 hour
+// Saving settings only clears the cache of the instance that handled the save.
+// Cloudflare Workers run many short-lived isolates, so keep the TTL short there
+// — otherwise other isolates serve stale payment / OAuth keys for up to an
+// hour. Reading the config table once a minute is cheap.
+const CACHE_TTL = isCloudflareWorker ? 60_000 : 3600_000;
+let warnedNoDatabase = false;
 
 /**
  * Get all configs from database.
@@ -24,7 +29,14 @@ export async function getDbConfigs(): Promise<ConfigMap> {
   }
 
   try {
-    if (!envConfigs.database_url && envConfigs.database_provider !== 'd1') {
+    // Hyperdrive deployments have no DATABASE_URL — hasDatabaseConfigured()
+    // knows about the binding. Skipping here silently drops every admin
+    // setting (payments, OAuth, storage…), so say so.
+    if (!hasDatabaseConfigured()) {
+      if (!warnedNoDatabase) {
+        warnedNoDatabase = true;
+        console.warn('[config] no database configured, skipping db configs');
+      }
       return {};
     }
 
@@ -49,7 +61,8 @@ export async function getDbConfigs(): Promise<ConfigMap> {
     cachedConfigs = result;
     cacheTime = now;
     return result;
-  } catch {
+  } catch (error) {
+    console.error('[config] failed to load db configs', error);
     return {};
   }
 }
@@ -118,6 +131,45 @@ export function isMaskedConfigValue(value: string): boolean {
   return value.startsWith(MASK_PREFIX);
 }
 
+/** Endpoint settings → the saved secrets that get sent to that endpoint. */
+const ENDPOINT_SECRETS: Record<string, string[]> = {
+  openai_base_url: ['openai_api_key'],
+  anthropic_base_url: ['anthropic_api_key'],
+  r2_endpoint: ['r2_secret_key'],
+  telegram_api_base: ['telegram_bot_token'],
+  notify_webhook_url: ['notify_webhook_token'],
+};
+
+const normalizeEndpoint = (value: string | undefined) =>
+  (value || '').trim().replace(/\/+$/, '');
+
+/**
+ * Throws when `changes` points an endpoint somewhere new but keeps the saved
+ * secret for it (left out or masked). Secrets are write-only in the UI; without
+ * this, anyone with settings.write could re-point an endpoint at their own
+ * server and have the next request (or a settings test) deliver the key there.
+ */
+export function assertEndpointSecretsResupplied(
+  changes: ConfigMap,
+  saved: ConfigMap
+) {
+  for (const [endpoint, secrets] of Object.entries(ENDPOINT_SECRETS)) {
+    const next = changes[endpoint];
+    if (typeof next !== 'string' || isMaskedConfigValue(next)) continue;
+    if (normalizeEndpoint(next) === normalizeEndpoint(saved[endpoint]))
+      continue;
+    for (const secret of secrets) {
+      const provided = changes[secret];
+      const reentered =
+        typeof provided === 'string' &&
+        provided !== '' &&
+        !isMaskedConfigValue(provided);
+      if (saved[secret] && !reentered)
+        throw new Error(`Changing ${endpoint} requires re-entering ${secret}`);
+    }
+  }
+}
+
 /**
  * Save multiple configs to database (upsert). Protected keys are silently
  * dropped — see PROTECTED_CONFIG_KEYS. Masked values round-tripped from the
@@ -125,6 +177,7 @@ export function isMaskedConfigValue(value: string): boolean {
  * encrypted at rest — see SECRET_SETTING_NAMES / SECRET_KEY_PATTERN.
  */
 export async function saveConfigs(configs: ConfigMap) {
+  assertEndpointSecretsResupplied(configs, await getAllConfigs());
   const entries = await Promise.all(
     Object.entries(configs)
       .filter(

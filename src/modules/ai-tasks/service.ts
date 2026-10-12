@@ -1,8 +1,9 @@
 import { and, desc, eq, isNull } from 'drizzle-orm';
 
 import { db } from '@/core/db';
+import { atomic, AtomicGuardError } from '@/core/db/atomic';
 import { aiTask } from '@/config/db/schema';
-import { consume, revoke } from '@/modules/credits/service';
+import { planConsume, revoke } from '@/modules/credits/service';
 import { getUuid } from '@/lib/hash';
 
 export enum AITaskStatus {
@@ -28,9 +29,8 @@ export async function createTask(params: {
   const { userId, mediaType, provider, model, prompt, costCredits, options } =
     params;
 
-  return db().transaction(async (tx: any) => {
-    // 1. Insert task
-    const taskData: any = {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const taskData: typeof aiTask.$inferInsert = {
       id: getUuid(),
       userId,
       mediaType,
@@ -41,36 +41,45 @@ export async function createTask(params: {
       costCredits: costCredits || 0,
     };
 
-    const [task] = await tx.insert(aiTask).values(taskData).returning();
-
-    // 2. Consume credits if cost > 0
-    if (costCredits && costCredits > 0) {
-      const result = await consume({
-        userId,
-        credits: costCredits,
-        scene: 'ai_task',
-        description: `AI ${mediaType} generation`,
-        metadata: JSON.stringify({ taskId: task.id }),
-        tx,
-      });
-
-      if (!result.success) {
-        throw new Error('Insufficient credits');
-      }
-
-      // Store consumed credit ID for potential revocation
-      if (result.consumedCredit) {
-        await tx
-          .update(aiTask)
-          .set({
-            taskInfo: JSON.stringify({ creditId: result.consumedCredit.id }),
+    // Plan the credit charge first, then write the task and the charge in one
+    // atomic step (D1-safe) — never a task without its charge or vice versa.
+    const plan =
+      costCredits && costCredits > 0
+        ? await planConsume({
+            userId,
+            credits: costCredits,
+            scene: 'ai_task',
+            description: `AI ${mediaType} generation`,
+            metadata: JSON.stringify({ taskId: taskData.id }),
           })
-          .where(eq(aiTask.id, task.id));
-      }
+        : undefined;
+    if (plan === null) throw new Error('Insufficient credits');
+    if (plan) {
+      // Stored for revocation if the task fails.
+      taskData.taskInfo = JSON.stringify({
+        creditId: plan.consumedCredit.id,
+      });
     }
 
+    try {
+      await atomic((q) => [
+        q.insert(aiTask).values(taskData),
+        ...(plan ? plan.steps(q) : []),
+      ]);
+    } catch (error) {
+      // A concurrent spend drained the grants we planned on: re-plan.
+      if (error instanceof AtomicGuardError) continue;
+      throw error;
+    }
+
+    const [task] = await db()
+      .select()
+      .from(aiTask)
+      .where(eq(aiTask.id, taskData.id))
+      .limit(1);
     return task;
-  });
+  }
+  throw new Error('Insufficient credits');
 }
 
 /**

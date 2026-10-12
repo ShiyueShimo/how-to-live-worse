@@ -5,7 +5,7 @@ import { useMutation } from '@tanstack/react-query';
 import { Check } from 'lucide-react';
 
 import { apiPost } from '@/lib/api-client';
-import { currentPathWithQuery } from '@/lib/redirect';
+import { track } from '@/lib/track';
 import { cn } from '@/lib/utils';
 import { m } from '@/paraglide/messages.js';
 import { Button } from '@/components/ui/button';
@@ -73,8 +73,8 @@ export function PricingTable({
         credits: plan.credits,
         credits_valid_days: plan.creditsValidDays,
         payment_provider: plan.paymentProvider || 'stripe',
-        // Come back to the page the user paid from.
-        redirect: currentPathWithQuery('/settings/billing'),
+        // Land on the order list so the user sees the payment they just made.
+        redirect: '/settings/payments',
       }),
     onSuccess: (data) => {
       if (data?.checkout_url) {
@@ -87,6 +87,12 @@ export function PricingTable({
   });
 
   function handleCheckout(plan: PricingPlan) {
+    // Shows in the admin user timeline; ignored for signed-out visitors.
+    track('plan_selected', {
+      plan: plan.id,
+      product: plan.productId ?? null,
+      interval: plan.plan?.interval ?? plan.interval ?? null,
+    });
     if (onCheckout) {
       onCheckout(plan);
       return;

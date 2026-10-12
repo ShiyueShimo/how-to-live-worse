@@ -229,6 +229,13 @@ export const testSpecs: Record<string, TestSpec> = {
       },
     ],
   },
+  // Notify: no inputs. The settings group sends a sample paid order and a
+  // sample ticket to every configured bot; channel groups test just that bot.
+  notify_settings: { group: 'notify_settings', fields: [] },
+  notify_telegram: { group: 'notify_telegram', fields: [] },
+  notify_feishu: { group: 'notify_feishu', fields: [] },
+  notify_wecom: { group: 'notify_wecom', fields: [] },
+  notify_webhook: { group: 'notify_webhook', fields: [] },
 };
 
 export function getTestSpec(group: string): TestSpec | undefined {

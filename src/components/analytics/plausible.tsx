@@ -1,3 +1,5 @@
+import { isScriptUrlShape } from '@/lib/embed-ids';
+
 // Plausible script — rendered as native <script> elements (not next/script)
 // so the tags land in the SSR HTML directly. next/script in App Router is a
 // Client Component; inside an async Server Component it only emits an RSC
@@ -11,13 +13,16 @@ export function Plausible({
   domain?: string;
   src?: string;
 }) {
-  if (!src) return null;
+  // The host was checked on the server against PLAUSIBLE_SCRIPT_HOSTS (see
+  // __root.tsx); here only the shape, which needs no server config.
+  const scriptSrc = src.trim();
+  if (!scriptSrc || !isScriptUrlShape(scriptSrc)) return null;
   return (
     <>
       <script
         id="plausible-loader"
         data-domain={domain || undefined}
-        src={src}
+        src={scriptSrc}
         async
       />
       <script

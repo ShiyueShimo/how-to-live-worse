@@ -2,6 +2,7 @@ import { randomBytes } from 'crypto';
 import { and, eq, sql } from 'drizzle-orm';
 
 import { db } from '@/core/db';
+import { atomic, AtomicGuardError, guard } from '@/core/db/atomic';
 import { inviteCode, subscription, userInvite } from '@/config/db/schema';
 import { getUuid } from '@/lib/hash';
 
@@ -94,8 +95,8 @@ export async function validateInviteCode(code: string): Promise<{
 /**
  * Atomically redeem an invite code for a user.
  *
- * The row is locked inside a transaction so that concurrent requests can't
- * over-redeem (usedCount > maxUses). If the user has already redeemed any
+ * The use is claimed in one guarded atomic write so that concurrent requests
+ * can't over-redeem (usedCount > maxUses). If the user has already redeemed any
  * code, returns the existing trialEndsAt unchanged.
  */
 export async function redeemInviteCode(params: {
@@ -106,9 +107,9 @@ export async function redeemInviteCode(params: {
   error?: string;
   trialEndsAt?: Date;
 }> {
-  return db().transaction(async (tx: any) => {
+  for (let attempt = 0; attempt < 2; attempt++) {
     // 1. Idempotency: user already has an invite record → return it
-    const [existing] = await tx
+    const [existing] = await db()
       .select()
       .from(userInvite)
       .where(eq(userInvite.userId, params.userId))
@@ -117,16 +118,12 @@ export async function redeemInviteCode(params: {
       return { ok: true, trialEndsAt: existing.trialEndsAt };
     }
 
-    // 2. Lock the invite-code row (postgres/mysql honor FOR UPDATE;
-    //    sqlite serializes writes inside the transaction anyway).
-    const lockedQuery = tx
+    // 2. Validate the code (fast path; the guard below re-checks atomically)
+    const [row] = await db()
       .select()
       .from(inviteCode)
       .where(eq(inviteCode.code, params.code))
       .limit(1);
-    const [row] = await (lockedQuery.for
-      ? lockedQuery.for('update')
-      : lockedQuery);
     if (!row) {
       return { ok: false, error: 'Invalid invite code' };
     }
@@ -137,27 +134,41 @@ export async function redeemInviteCode(params: {
       return { ok: false, error: 'Invite code has been fully used' };
     }
 
-    // 3. Insert user_invite and bump usedCount in the same transaction
-    const id = getUuid();
+    // 3. Insert user_invite and bump usedCount atomically (D1-safe), only if
+    //    the code still has a use left and this user hasn't redeemed one.
     const now = new Date();
     const trialEndsAt = new Date(
       now.getTime() + row.trialDays * 24 * 60 * 60 * 1000
     );
-
-    await tx.insert(userInvite).values({
-      id,
-      userId: params.userId,
-      inviteCodeId: row.id,
-      activatedAt: now,
-      trialEndsAt,
-    });
-    await tx
-      .update(inviteCode)
-      .set({ usedCount: sql`${inviteCode.usedCount} + 1` })
-      .where(eq(inviteCode.id, row.id));
-
-    return { ok: true, trialEndsAt };
-  });
+    try {
+      await atomic((q) => [
+        guard({
+          table: inviteCode,
+          column: 'code',
+          where: eq(inviteCode.id, row.id),
+          require: sql`${inviteCode.usedCount} < ${inviteCode.maxUses} and not exists (select 1 from ${userInvite} where ${userInvite.userId} = ${params.userId})`,
+          message: 'Invite code has been fully used',
+        }),
+        q.insert(userInvite).values({
+          id: getUuid(),
+          userId: params.userId,
+          inviteCodeId: row.id,
+          activatedAt: now,
+          trialEndsAt,
+        }),
+        q
+          .update(inviteCode)
+          .set({ usedCount: sql`${inviteCode.usedCount} + 1` })
+          .where(eq(inviteCode.id, row.id)),
+      ]);
+      return { ok: true, trialEndsAt };
+    } catch (error) {
+      // Lost a race: re-read (the user may now have an invite, or the code
+      // may be used up) and answer from the fresh state.
+      if (!(error instanceof AtomicGuardError)) throw error;
+    }
+  }
+  return { ok: false, error: 'Invite code has been fully used' };
 }
 
 // ─── User status ─────────────────────────────────────────────────────────────

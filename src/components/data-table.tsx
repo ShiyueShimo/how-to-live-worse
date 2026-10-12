@@ -5,7 +5,13 @@ import {
   useReactTable,
   type ColumnDef,
 } from '@tanstack/react-table';
-import { ChevronLeft, ChevronRight, RefreshCw, Search } from 'lucide-react';
+import {
+  ChevronLeft,
+  ChevronRight,
+  Loader2,
+  RefreshCw,
+  Search,
+} from 'lucide-react';
 
 import { cn } from '@/lib/utils';
 import { m } from '@/paraglide/messages.js';
@@ -97,6 +103,9 @@ export function DataTable<T>({
 
   const showHeader = onSearchChange || toolbar || onRefresh;
   const busy = refreshing || loading;
+  // Nothing to show yet and a fetch in flight: first load (or a filter whose
+  // previous result was also empty). Refetches with rows keep showing them.
+  const initialLoading = !!loading && data.length === 0;
 
   return (
     <div className="space-y-4">
@@ -154,7 +163,19 @@ export function DataTable<T>({
             ))}
           </TableHeader>
           <TableBody>
-            {table.getRowModel().rows.length === 0 ? (
+            {initialLoading ? (
+              <TableRow>
+                <TableCell
+                  colSpan={columns.length}
+                  className="text-muted-foreground py-8 text-center"
+                >
+                  <span className="inline-flex items-center gap-2">
+                    <Loader2 className="size-4 animate-spin" />
+                    {m['common.table.loading']()}
+                  </span>
+                </TableCell>
+              </TableRow>
+            ) : table.getRowModel().rows.length === 0 ? (
               <TableRow>
                 <TableCell
                   colSpan={columns.length}
@@ -189,7 +210,7 @@ export function DataTable<T>({
 
       <div className="flex items-center justify-between px-2">
         <p className="text-muted-foreground text-sm">
-          {m['common.table.total']({ count: total })}
+          {initialLoading ? '' : m['common.table.total']({ count: total })}
         </p>
         {total > pageSize && (
           <div className="flex items-center gap-2">

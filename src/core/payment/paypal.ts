@@ -6,6 +6,7 @@ import {
   PaymentInvoice,
   PaymentStatus,
   PaymentType,
+  RefundStatus,
   SubscriptionCycleType,
   SubscriptionInfo,
   SubscriptionStatus,
@@ -14,6 +15,8 @@ import {
   type PaymentEvent,
   type PaymentOrder,
   type PaymentProvider,
+  type PaymentRefund,
+  type PaymentRefundRequest,
   type PaymentSession,
 } from './types';
 
@@ -636,6 +639,61 @@ export class PayPalProvider implements PaymentProvider {
   }
 
   /**
+   * Full refund. One-time orders refund the order's capture; subscription
+   * payments are v1 sales and refund through the sale endpoint.
+   */
+  async refundPayment(request: PaymentRefundRequest): Promise<PaymentRefund> {
+    await this.ensureAccessToken();
+    const headers = { 'PayPal-Request-Id': `refund_${request.orderNo}` };
+
+    if (
+      request.paymentType === PaymentType.SUBSCRIPTION ||
+      request.paymentType === PaymentType.RENEW
+    ) {
+      const saleId = request.invoiceId || request.transactionId;
+      if (!saleId) throw new Error('No PayPal sale id on this order');
+      const result = await this.makeRequest(
+        `/v1/payments/sale/${saleId}/refund`,
+        'POST',
+        {},
+        headers
+      );
+      return this.toRefund(result.id, result.state, result);
+    }
+
+    let captureId = request.invoiceId;
+    if (!captureId && request.transactionId) {
+      const order = await this.makeRequest(
+        `/v2/checkout/orders/${request.transactionId}`,
+        'GET'
+      );
+      captureId = order.purchase_units?.[0]?.payments?.captures?.[0]?.id;
+    }
+    if (!captureId) throw new Error('No PayPal capture id on this order');
+
+    const result = await this.makeRequest(
+      `/v2/payments/captures/${captureId}/refund`,
+      'POST',
+      request.reason ? { note_to_payer: request.reason.slice(0, 255) } : {},
+      headers
+    );
+    return this.toRefund(result.id, result.status, result);
+  }
+
+  private toRefund(id: string, rawStatus: string, result: any): PaymentRefund {
+    const status = String(rawStatus || '').toUpperCase();
+    if (status === 'FAILED' || status === 'CANCELLED') {
+      throw new Error(`PayPal refund ${status.toLowerCase()}`);
+    }
+    return {
+      refundId: id,
+      status:
+        status === 'COMPLETED' ? RefundStatus.SUCCEEDED : RefundStatus.PENDING,
+      refundResult: result,
+    };
+  }
+
+  /**
    * Capture an authorized payment
    */
   async capturePayment(orderId: string): Promise<PaymentSession> {
@@ -685,11 +743,17 @@ export class PayPalProvider implements PaymentProvider {
     this.tokenExpiry = Date.now() + data.expires_in * 1000;
   }
 
-  private async makeRequest(endpoint: string, method: string, data?: any) {
+  private async makeRequest(
+    endpoint: string,
+    method: string,
+    data?: any,
+    extraHeaders?: Record<string, string>
+  ) {
     const url = `${this.baseUrl}${endpoint}`;
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.accessToken}`,
       'Content-Type': 'application/json',
+      ...extraHeaders,
     };
 
     const config: RequestInit = {

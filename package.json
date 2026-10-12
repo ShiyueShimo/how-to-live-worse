@@ -5,16 +5,35 @@
   "type": "module",
   "scripts": {
     "dev": "vite dev --port 3000",
+    "prebuild": "node scripts/db-setup.mjs",
     "build": "pnpm export:guide && vite build",
     "start": "node .output/server/index.mjs",
+    "precf:build": "node scripts/db-setup.mjs",
+    "cf:build": "NITRO_PRESET=cloudflare_module vite build",
+    "cf:deploy": "sh -c 'set -a && [ -f .env.production ] && . ./.env.production; set +a && pnpm cf:build && exec wrangler deploy'",
+    "postinstall": "mkdir -p data && (test -f src/config/db/schema.ts || node scripts/db-setup.mjs)",
+    "db:setup": "node scripts/db-setup.mjs",
+    "db:push": "tsx scripts/with-env.ts drizzle-kit push --config=drizzle.config.ts",
+    "db:generate": "tsx scripts/with-env.ts drizzle-kit generate --config=drizzle.config.ts",
+    "db:migrate": "tsx scripts/with-env.ts drizzle-kit migrate --config=drizzle.config.ts",
+    "db:studio": "tsx scripts/with-env.ts drizzle-kit studio --config=drizzle.config.ts",
+    "rbac:init": "tsx scripts/with-env.ts tsx scripts/init-rbac.ts",
+    "rbac:assign": "tsx scripts/with-env.ts tsx scripts/assign-role.ts",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "prepare": "husky",
+    "admin:token": "tsx scripts/with-env.ts tsx scripts/admin-token.ts",
+    "admin:mcp": "tsx scripts/admin-mcp.ts",
+    "test:admin": "node --import tsx --test tests/admin-agent.test.ts",
+    "test:atomic": "node --import tsx --test tests/atomic.test.ts",
+    "test:atomic:d1": "ATOMIC_D1=1 node --import tsx --test tests/atomic.test.ts",
+    "test:atomic:pg": "TSX_TSCONFIG_PATH=tests/tsconfig.pg.json node --import tsx --test tests/atomic.test.ts",
     "test:site": "node --test scripts/site-smoke.test.mjs",
-    "test:content": "tsx --test tests/*.test.ts",
+    "test:content": "tsx --test tests/guide-*.test.ts tests/library.test.ts",
     "import:guide": "tsx scripts/import-guide.ts",
     "export:guide": "tsx scripts/export-guide.ts",
     "validate:exports": "tsx scripts/validate-guide-exports.ts",
-    "validate:guide": "tsx scripts/validate-guide-content.ts",
-    "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "validate:guide": "tsx scripts/validate-guide-content.ts"
   },
   "lint-staged": {
     "*.{ts,tsx,js,jsx,mjs,cjs}": "prettier --write",
@@ -30,6 +49,7 @@
     "@fontsource/libre-baskerville": "^5.2.10",
     "@libsql/client": "^0.14.0",
     "@mdx-js/react": "^3.1.1",
+    "@modelcontextprotocol/server": "^2.3.1",
     "@react-email/components": "^1.0.0",
     "@tanstack/react-form": "^1.33.0",
     "@tanstack/react-query": "^5.101.0",
@@ -42,7 +62,7 @@
     "@tiptap/starter-kit": "^3.25.0",
     "@types/mdx": "^2.0.13",
     "aws4fetch": "^1.0.0",
-    "better-auth": "^1.6.2",
+    "better-auth": "^1.7.7",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.0",
     "drizzle-orm": "^0.44.2",
@@ -73,6 +93,7 @@
     "@ianvs/prettier-plugin-sort-imports": "^4.7.1",
     "@inlang/paraglide-js": "^2.18.2",
     "@mdx-js/rollup": "^3.1.1",
+    "@modelcontextprotocol/client": "^2.3.1",
     "@tailwindcss/vite": "^4.3.0",
     "@tanstack/react-query-devtools": "^5.101.0",
     "@types/markdown-it": "^14.1.2",
@@ -100,7 +121,11 @@
       "esbuild",
       "msw",
       "sharp"
-    ]
+    ],
+    "overrides": {
+      "seroval": "1.6.8",
+      "seroval-plugins": "1.6.8"
+    }
   },
   "description": "An independent, source-linked satirical life guide."
 }

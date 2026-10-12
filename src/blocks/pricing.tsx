@@ -244,8 +244,8 @@ export function Pricing({ title }: { title?: string } = {}) {
         credits: plan.credits,
         credits_valid_days: plan.creditsValidDays,
         payment_provider: provider,
-        // Come back to the page the user paid from.
-        redirect: currentPathWithQuery('/settings/billing'),
+        // Land on the order list so the user sees the payment they just made.
+        redirect: '/settings/payments',
       }),
     onSuccess: (data) => {
       if (!data?.checkout_url) {

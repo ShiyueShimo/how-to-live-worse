@@ -40,6 +40,7 @@ export function getSettingTabs(): SettingTab[] {
     { name: 'analytics', title: 'Analytics' },
     { name: 'ads', title: 'Ads' },
     { name: 'customer_service', title: 'Customer Service' },
+    { name: 'notify', title: 'Notify' },
     { name: 'custom', title: 'Custom' },
   ];
 }
@@ -186,6 +187,13 @@ export function getSettingGroups(): SettingGroup[] {
       description: 'Inject plausible.js for self-hosted or cloud Plausible',
       tab: 'analytics',
     },
+    {
+      name: 'cookie_consent',
+      title: 'Cookie Consent',
+      description:
+        'Show a cookie banner to visitors. Until they accept, Google Analytics runs in Consent Mode (no cookies) and the AdSense script is not loaded. Plausible is cookieless and unaffected.',
+      tab: 'analytics',
+    },
 
     // Ads
     {
@@ -208,6 +216,39 @@ export function getSettingGroups(): SettingGroup[] {
       title: 'Tawk.to',
       description: 'Tawk.to live chat widget',
       tab: 'customer_service',
+    },
+
+    // Notify
+    {
+      name: 'notify_settings',
+      title: 'Notification Settings',
+      description: 'Choose which events push a message to the bots below',
+      tab: 'notify',
+    },
+    {
+      name: 'notify_telegram',
+      title: 'Telegram Bot',
+      description: 'Telegram Bot API sendMessage',
+      tab: 'notify',
+    },
+    {
+      name: 'notify_feishu',
+      title: 'Feishu / Lark Bot',
+      description: 'Feishu custom bot webhook',
+      tab: 'notify',
+    },
+    {
+      name: 'notify_wecom',
+      title: 'WeCom Bot',
+      description: 'WeCom (企业微信) group bot webhook',
+      tab: 'notify',
+    },
+    {
+      name: 'notify_webhook',
+      title: 'Webhook',
+      description:
+        'POST JSON to any endpoint — AI agents and automations (Grok bot, Cursor routine, Zapier, n8n…)',
+      tab: 'notify',
     },
   ];
 }
@@ -850,8 +891,18 @@ export function getSettings(): Setting[] {
       title: 'Script Src',
       type: 'text',
       placeholder: 'https://plausible.example.com/js/pa-XXXXX.js',
-      tip: 'Paste the complete site-specific script URL from Plausible, or leave blank to use the legacy cloud script',
+      tip: 'Paste the complete site-specific script URL from Plausible, or leave blank to use the legacy cloud script. Accepts a same-site proxy path (e.g. /js/script.js) or an https URL on plausible.io; a self-hosted domain must be listed in the server env PLAUSIBLE_SCRIPT_HOSTS (restart or redeploy, no rebuild)',
       group: 'plausible',
+      tab: 'analytics',
+    },
+
+    // ─── Analytics / Cookie Consent ──────────────────────────────────
+    {
+      name: 'cookie_consent_enabled',
+      title: 'Enable Cookie Banner',
+      type: 'switch',
+      tip: 'Recommended if you serve visitors in the EU/UK and use Google Analytics or AdSense',
+      group: 'cookie_consent',
       tab: 'analytics',
     },
 
@@ -906,6 +957,114 @@ export function getSettings(): Setting[] {
       placeholder: '1xxxxx/default',
       group: 'tawk',
       tab: 'customer_service',
+    },
+
+    // ─── Notify / Settings (events + shared message options) ─────────
+    {
+      name: 'notify_payment_enabled',
+      title: 'Successful payment',
+      type: 'switch',
+      group: 'notify_settings',
+      tab: 'notify',
+      defaultValue: 'false',
+    },
+    {
+      name: 'notify_ticket_enabled',
+      title: 'Tickets',
+      type: 'switch',
+      group: 'notify_settings',
+      tab: 'notify',
+      defaultValue: 'false',
+    },
+    {
+      name: 'notify_language',
+      title: 'Message language',
+      type: 'select',
+      options: [
+        { label: '中文', value: 'zh' },
+        { label: 'English', value: 'en' },
+      ],
+      group: 'notify_settings',
+      tab: 'notify',
+      defaultValue: 'zh',
+    },
+    {
+      name: 'notify_timezone',
+      title: 'Time zone',
+      type: 'text',
+      placeholder: 'Asia/Shanghai',
+      group: 'notify_settings',
+      tab: 'notify',
+    },
+
+    // ─── Notify / Telegram ───────────────────────────────────────────
+    {
+      name: 'telegram_bot_token',
+      title: 'Bot Token',
+      type: 'password',
+      placeholder: '123456789:AAxxxxxxxx',
+      group: 'notify_telegram',
+      tab: 'notify',
+    },
+    {
+      name: 'telegram_chat_id',
+      title: 'Chat ID',
+      type: 'text',
+      placeholder: '-1001234567890',
+      group: 'notify_telegram',
+      tab: 'notify',
+    },
+    {
+      name: 'telegram_api_base',
+      title: 'API Base URL',
+      type: 'text',
+      placeholder: 'https://api.telegram.org',
+      group: 'notify_telegram',
+      tab: 'notify',
+    },
+
+    // ─── Notify / Feishu ─────────────────────────────────────────────
+    {
+      name: 'feishu_webhook_url',
+      title: 'Webhook URL',
+      type: 'password',
+      placeholder: 'https://open.feishu.cn/open-apis/bot/v2/hook/xxx',
+      group: 'notify_feishu',
+      tab: 'notify',
+    },
+    {
+      name: 'feishu_secret',
+      title: 'Signing Secret',
+      type: 'password',
+      group: 'notify_feishu',
+      tab: 'notify',
+    },
+
+    // ─── Notify / WeCom ──────────────────────────────────────────────
+    {
+      name: 'wecom_webhook_url',
+      title: 'Webhook URL',
+      type: 'password',
+      placeholder: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx',
+      group: 'notify_wecom',
+      tab: 'notify',
+    },
+
+    // ─── Notify / Generic webhook ────────────────────────────────────
+    {
+      name: 'notify_webhook_url',
+      title: 'Webhook URL',
+      type: 'password',
+      placeholder: 'https://example.com/hooks/xxx',
+      group: 'notify_webhook',
+      tab: 'notify',
+    },
+    {
+      name: 'notify_webhook_token',
+      title: 'Bearer Token',
+      type: 'password',
+      group: 'notify_webhook',
+      tab: 'notify',
     },
   ];
 }

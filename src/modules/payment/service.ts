@@ -1,6 +1,7 @@
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 
 import { db } from '@/core/db';
+import { atomic, AtomicGuardError, guard } from '@/core/db/atomic';
 import {
   AlipayProvider,
   CreemProvider,
@@ -15,10 +16,15 @@ import {
   type CheckoutSession,
   type PaymentEvent,
   type PaymentOrder,
+  type PaymentRefund,
 } from '@/core/payment/types';
 import { credit, order, subscription } from '@/config/db/schema';
 import { getAllConfigs } from '@/modules/config/service';
-import { calculateCreditExpirationTime } from '@/modules/credits/service';
+import {
+  calculateCreditExpirationTime,
+  planDeductForRefund,
+} from '@/modules/credits/service';
+import { notifyPaymentSuccess } from '@/modules/notify/service';
 import {
   findByProviderSubscriptionId,
   findBySubscriptionNo,
@@ -36,7 +42,13 @@ enum OrderStatus {
   CREATED = 'created',
   PAID = 'paid',
   FAILED = 'failed',
+  REFUNDING = 'refunding', // claimed by an in-flight refund
+  REFUNDED = 'refunded',
 }
+
+// A refund stuck in REFUNDING (crash between provider call and DB commit) can
+// be retried after this long; provider idempotency keys make the retry safe.
+const REFUND_STALE_MS = 5 * 60 * 1000;
 
 // --- Payment Manager ---
 
@@ -169,7 +181,7 @@ export async function createCheckout(params: {
   }
 
   const finalSuccessUrl =
-    paymentOrder.successUrl || `${appUrl}/settings/billing?success=1`;
+    paymentOrder.successUrl || `${appUrl}/settings/payments`;
   const callbackSuccessUrl = `${appUrl}/api/payment/callback?order_no=${orderNo}&redirect=${encodeURIComponent(finalSuccessUrl)}`;
 
   const session = await pm.createPayment({
@@ -200,6 +212,7 @@ export async function createCheckout(params: {
       creditsAmount: credits ?? null,
       creditsValidDays: creditsValidDays ?? null,
       paymentType: paymentOrder.type || 'one-time',
+      paymentInterval: paymentOrder.plan?.interval || null,
       paymentProvider: session.provider,
       paymentSessionId: session.checkoutInfo.sessionId,
       checkoutInfo: JSON.stringify(session.checkoutInfo),
@@ -299,9 +312,21 @@ async function handleCheckoutSuccess(session: any, provider: string) {
     .limit(1);
 
   if (!existingOrder) return;
+  await settleCheckoutOrder(existingOrder, session, provider);
+}
 
-  // Idempotency: skip if already paid
-  if (existingOrder.status === OrderStatus.PAID) return;
+/**
+ * Apply a checkout outcome to an order read moments earlier. The read can be
+ * stale — a concurrent webhook or callback may have settled the order since —
+ * so this re-checks atomically instead of trusting `existingOrder.status`.
+ * Exported for tests that replay that race.
+ */
+export async function settleCheckoutOrder(
+  existingOrder: typeof order.$inferSelect,
+  session: any,
+  provider: string
+) {
+  // Fast path only; the conditional update below is the real guard.
   if (
     existingOrder.status !== OrderStatus.CREATED &&
     existingOrder.status !== OrderStatus.PENDING
@@ -312,6 +337,18 @@ async function handleCheckoutSuccess(session: any, provider: string) {
   const subscriptionInfo = session.subscriptionInfo;
 
   if (session.paymentStatus === PaymentStatus.SUCCESS) {
+    // CNY providers charge exactly the order amount (no coupons or tax on
+    // their side), so any mismatch means the notification belongs to some
+    // other trade — refuse to settle rather than grant on the wrong payment.
+    if (
+      (provider === 'alipay' || provider === 'wechat') &&
+      paymentInfo?.amount !== existingOrder.amount
+    ) {
+      throw new Error(
+        `Paid amount ${paymentInfo?.amount} does not match order ${existingOrder.orderNo} amount ${existingOrder.amount}`
+      );
+    }
+
     // Prepare order update
     const orderUpdate: Record<string, any> = {
       status: OrderStatus.PAID,
@@ -329,80 +366,103 @@ async function handleCheckoutSuccess(session: any, provider: string) {
       discountAmount: paymentInfo?.discountAmount || null,
     };
 
-    // Atomically update order + create subscription + grant credits
-    await db().transaction(async (tx: any) => {
-      // 1. Create subscription if applicable
-      if (subscriptionInfo && session.subscriptionId) {
-        const subNo = getSnowId();
-        const newSub: any = {
-          id: getUuid(),
-          subscriptionNo: subNo,
-          userId: existingOrder.userId,
-          userEmail:
-            existingOrder.userEmail || existingOrder.paymentEmail || '',
-          status: subscriptionInfo.status || SubscriptionStatus.ACTIVE,
-          paymentProvider: provider,
-          subscriptionId: session.subscriptionId,
-          subscriptionResult: JSON.stringify(session.subscriptionResult),
-          productId: existingOrder.productId,
-          description: subscriptionInfo.description || 'Subscription Created',
-          amount: subscriptionInfo.amount,
-          currency: subscriptionInfo.currency,
-          interval: subscriptionInfo.interval,
-          intervalCount: subscriptionInfo.intervalCount,
-          trialPeriodDays: subscriptionInfo.trialPeriodDays,
-          currentPeriodStart: subscriptionInfo.currentPeriodStart,
-          currentPeriodEnd: subscriptionInfo.currentPeriodEnd,
-          billingUrl: subscriptionInfo.billingUrl,
-          planName: existingOrder.planName || existingOrder.productName,
-          productName: existingOrder.productName,
-          creditsAmount: existingOrder.creditsAmount,
-          creditsValidDays: existingOrder.creditsValidDays,
-          paymentProductId: existingOrder.paymentProductId,
-          paymentUserId: paymentInfo?.paymentUserId,
-        };
-        await tx.insert(subscription).values(newSub);
-        orderUpdate.subscriptionNo = subNo;
-        orderUpdate.subscriptionId = session.subscriptionId;
-        orderUpdate.subscriptionResult = JSON.stringify(
-          session.subscriptionResult
-        );
-      }
+    // The webhook and the synchronous return (callback) both land here, often
+    // at the same moment, so the status check above is only a fast path. The
+    // guard re-checks inside the atomic write: exactly one caller moves the
+    // order out of created/pending, and only that caller's grants commit —
+    // all of it or none (D1 included; see core/db/atomic).
+    const subscriptionNo =
+      subscriptionInfo && session.subscriptionId ? getSnowId() : undefined;
+    if (subscriptionNo) {
+      orderUpdate.subscriptionNo = subscriptionNo;
+      orderUpdate.subscriptionId = session.subscriptionId;
+      orderUpdate.subscriptionResult = JSON.stringify(
+        session.subscriptionResult
+      );
+    }
 
-      // 2. Grant credits if applicable
-      if (existingOrder.creditsAmount && existingOrder.creditsAmount > 0) {
-        const credits = existingOrder.creditsAmount;
-        const expiresAt = calculateCreditExpirationTime({
-          creditsValidDays: existingOrder.creditsValidDays || 0,
-          currentPeriodEnd: subscriptionInfo?.currentPeriodEnd,
-        });
+    const newSub: any = subscriptionNo && {
+      id: getUuid(),
+      subscriptionNo,
+      userId: existingOrder.userId,
+      userEmail: existingOrder.userEmail || existingOrder.paymentEmail || '',
+      status: subscriptionInfo.status || SubscriptionStatus.ACTIVE,
+      paymentProvider: provider,
+      subscriptionId: session.subscriptionId,
+      subscriptionResult: JSON.stringify(session.subscriptionResult),
+      productId: existingOrder.productId,
+      description: subscriptionInfo.description || 'Subscription Created',
+      amount: subscriptionInfo.amount,
+      currency: subscriptionInfo.currency,
+      interval: subscriptionInfo.interval,
+      intervalCount: subscriptionInfo.intervalCount,
+      trialPeriodDays: subscriptionInfo.trialPeriodDays,
+      currentPeriodStart: subscriptionInfo.currentPeriodStart,
+      currentPeriodEnd: subscriptionInfo.currentPeriodEnd,
+      billingUrl: subscriptionInfo.billingUrl,
+      planName: existingOrder.planName || existingOrder.productName,
+      productName: existingOrder.productName,
+      creditsAmount: existingOrder.creditsAmount,
+      creditsValidDays: existingOrder.creditsValidDays,
+      paymentProductId: existingOrder.paymentProductId,
+      paymentUserId: paymentInfo?.paymentUserId,
+    };
 
-        await tx.insert(credit).values({
-          id: getUuid(),
-          userId: existingOrder.userId,
-          userEmail: existingOrder.userEmail || '',
-          orderNo: existingOrder.orderNo,
-          subscriptionNo: orderUpdate.subscriptionNo || '',
-          transactionNo: getSnowId(),
-          transactionType: 'grant',
-          transactionScene:
-            existingOrder.paymentType === 'subscription'
-              ? 'subscription'
-              : 'payment',
-          credits,
-          remainingCredits: credits,
-          description: 'Grant credit',
-          expiresAt,
-          status: 'active',
-        });
-      }
+    const credits = existingOrder.creditsAmount || 0;
+    const newCredit: any = credits > 0 && {
+      id: getUuid(),
+      userId: existingOrder.userId,
+      userEmail: existingOrder.userEmail || '',
+      orderNo: existingOrder.orderNo,
+      subscriptionNo: subscriptionNo || '',
+      // One grant per order, enforced by the unique transaction_no.
+      transactionNo: `grant_${existingOrder.orderNo}`,
+      transactionType: 'grant',
+      transactionScene:
+        existingOrder.paymentType === 'subscription'
+          ? 'subscription'
+          : 'payment',
+      credits,
+      remainingCredits: credits,
+      description: 'Grant credit',
+      expiresAt: calculateCreditExpirationTime({
+        creditsValidDays: existingOrder.creditsValidDays || 0,
+        currentPeriodEnd: subscriptionInfo?.currentPeriodEnd,
+      }),
+      status: 'active',
+    };
 
-      // 3. Update order
-      await tx
-        .update(order)
-        .set(orderUpdate)
-        .where(eq(order.id, existingOrder.id));
-    });
+    let claimed = false;
+    try {
+      await atomic((q) => [
+        // 1. Claim: only an unpaid order can be settled.
+        guard({
+          table: order,
+          column: 'userId',
+          where: eq(order.id, existingOrder.id),
+          // Unpaid, never paid before, and nothing granted for it yet: the
+          // status alone isn't enough if anything ever moves a paid order back.
+          require: and(
+            inArray(order.status, [OrderStatus.CREATED, OrderStatus.PENDING]),
+            isNull(order.paidAt),
+            sql`not exists (select 1 from ${credit} where ${credit.orderNo} = ${existingOrder.orderNo} and ${credit.transactionType} = 'grant')`
+          )!,
+          message: 'Order already settled',
+        }),
+        q.update(order).set(orderUpdate).where(eq(order.id, existingOrder.id)),
+        // 2. Subscription, 3. credits.
+        newSub && q.insert(subscription).values(newSub),
+        newCredit && q.insert(credit).values(newCredit),
+      ]);
+      claimed = true;
+    } catch (error) {
+      if (!(error instanceof AtomicGuardError)) throw error;
+      // another request already handled it
+    }
+
+    // Outside the transaction: only announce orders that actually committed,
+    // and only from the request that claimed them.
+    if (claimed) await notifyPaymentSuccess(existingOrder.orderNo);
   } else if (
     session.paymentStatus === PaymentStatus.FAILED ||
     session.paymentStatus === PaymentStatus.CANCELED
@@ -413,7 +473,12 @@ async function handleCheckoutSuccess(session: any, provider: string) {
         status: OrderStatus.FAILED,
         paymentResult: JSON.stringify(session.paymentResult),
       })
-      .where(eq(order.id, existingOrder.id));
+      .where(
+        and(
+          eq(order.id, existingOrder.id),
+          inArray(order.status, [OrderStatus.CREATED, OrderStatus.PENDING])
+        )
+      );
   }
 }
 
@@ -459,75 +524,95 @@ export async function handleSubscriptionRenewal(
 
   const renewalOrderNo = getSnowId();
 
-  await db().transaction(async (tx: any) => {
-    // 1. Update subscription period
-    await tx
-      .update(subscription)
-      .set({
-        currentPeriodStart: subscriptionInfo.currentPeriodStart,
-        currentPeriodEnd: subscriptionInfo.currentPeriodEnd,
-      })
-      .where(eq(subscription.subscriptionNo, existingSub.subscriptionNo));
+  const credits = existingSub.creditsAmount || 0;
+  const newCredit: any = credits > 0 && {
+    id: getUuid(),
+    userId: existingSub.userId,
+    userEmail: existingSub.userEmail || '',
+    orderNo: renewalOrderNo,
+    subscriptionNo: existingSub.subscriptionNo,
+    transactionNo: `grant_${renewalOrderNo}`,
+    transactionType: 'grant',
+    transactionScene: 'renewal',
+    credits,
+    remainingCredits: credits,
+    description: 'Grant credit',
+    expiresAt: calculateCreditExpirationTime({
+      creditsValidDays: existingSub.creditsValidDays || 0,
+      currentPeriodEnd: subscriptionInfo.currentPeriodEnd,
+    }),
+    status: 'active',
+  };
 
-    // 2. Create renewal order
-    await tx.insert(order).values({
-      id: getUuid(),
-      orderNo: renewalOrderNo,
-      userId: existingSub.userId,
-      userEmail: existingSub.userEmail || '',
-      status: OrderStatus.PAID,
-      amount: existingSub.amount,
-      currency: existingSub.currency,
-      productId: existingSub.productId || '',
-      paymentType: 'renew',
-      paymentInterval: existingSub.interval || '',
-      paymentProvider: provider,
-      checkoutInfo: '',
-      description: 'Subscription Renewal',
-      productName: existingSub.productName || '',
-      planName: existingSub.planName || '',
-      creditsAmount: existingSub.creditsAmount,
-      creditsValidDays: existingSub.creditsValidDays,
-      paymentProductId: existingSub.paymentProductId || '',
-      paymentResult: JSON.stringify(session.paymentResult),
-      paymentAmount: paymentInfo?.paymentAmount,
-      paymentCurrency: paymentInfo?.paymentCurrency,
-      paymentEmail: paymentInfo?.paymentEmail,
-      paidAt: paymentInfo?.paidAt || new Date(),
-      invoiceId: paymentInfo?.invoiceId,
-      invoiceUrl: paymentInfo?.invoiceUrl,
-      subscriptionNo: existingSub.subscriptionNo,
-      subscriptionId: session.subscriptionId,
-      transactionId: paymentInfo?.transactionId,
-      paymentUserName: paymentInfo?.paymentUserName,
-      paymentUserId: paymentInfo?.paymentUserId,
-    });
-
-    // 3. Grant credits for renewal
-    if (existingSub.creditsAmount && existingSub.creditsAmount > 0) {
-      const credits = existingSub.creditsAmount;
-      const expiresAt = calculateCreditExpirationTime({
-        creditsValidDays: existingSub.creditsValidDays || 0,
-        currentPeriodEnd: subscriptionInfo.currentPeriodEnd,
-      });
-
-      await tx.insert(credit).values({
+  let claimed = false;
+  try {
+    await atomic((q) => [
+      // 1. Claim the renewal by advancing the subscription period. The
+      //    transactionId check above is racy (the provider retries, and several
+      //    events can describe one invoice); only one caller can move the period
+      //    start forward, and only that caller's order and credits commit.
+      guard({
+        table: subscription,
+        column: 'userId',
+        where: eq(subscription.subscriptionNo, existingSub.subscriptionNo),
+        require: or(
+          isNull(subscription.currentPeriodStart),
+          lt(
+            subscription.currentPeriodStart,
+            subscriptionInfo.currentPeriodStart
+          )
+        )!,
+        message: 'Period already renewed',
+      }),
+      q
+        .update(subscription)
+        .set({
+          currentPeriodStart: subscriptionInfo.currentPeriodStart,
+          currentPeriodEnd: subscriptionInfo.currentPeriodEnd,
+        })
+        .where(eq(subscription.subscriptionNo, existingSub.subscriptionNo)),
+      // 2. Renewal order, 3. renewal credits.
+      q.insert(order).values({
         id: getUuid(),
+        orderNo: renewalOrderNo,
         userId: existingSub.userId,
         userEmail: existingSub.userEmail || '',
-        orderNo: renewalOrderNo,
+        status: OrderStatus.PAID,
+        amount: existingSub.amount,
+        currency: existingSub.currency,
+        productId: existingSub.productId || '',
+        paymentType: 'renew',
+        paymentInterval: existingSub.interval || '',
+        paymentProvider: provider,
+        checkoutInfo: '',
+        description: 'Subscription Renewal',
+        productName: existingSub.productName || '',
+        planName: existingSub.planName || '',
+        creditsAmount: existingSub.creditsAmount,
+        creditsValidDays: existingSub.creditsValidDays,
+        paymentProductId: existingSub.paymentProductId || '',
+        paymentResult: JSON.stringify(session.paymentResult),
+        paymentAmount: paymentInfo?.paymentAmount,
+        paymentCurrency: paymentInfo?.paymentCurrency,
+        paymentEmail: paymentInfo?.paymentEmail,
+        paidAt: paymentInfo?.paidAt || new Date(),
+        invoiceId: paymentInfo?.invoiceId,
+        invoiceUrl: paymentInfo?.invoiceUrl,
         subscriptionNo: existingSub.subscriptionNo,
-        transactionNo: getSnowId(),
-        transactionType: 'grant',
-        transactionScene: 'renewal',
-        credits,
-        remainingCredits: credits,
-        description: 'Grant credit',
-        expiresAt,
-        status: 'active',
-      });
-    }
-  });
+        subscriptionId: session.subscriptionId,
+        transactionId: paymentInfo?.transactionId,
+        paymentUserName: paymentInfo?.paymentUserName,
+        paymentUserId: paymentInfo?.paymentUserId,
+      }),
+      newCredit && q.insert(credit).values(newCredit),
+    ]);
+    claimed = true;
+  } catch (error) {
+    if (!(error instanceof AtomicGuardError)) throw error;
+    // this period was already renewed
+  }
+
+  if (claimed) await notifyPaymentSuccess(renewalOrderNo);
 }
 
 // --- Subscription Updated ---
@@ -613,6 +698,211 @@ export async function cancelUserSubscription(params: {
   });
 
   return updated;
+}
+
+// --- Refund (admin-initiated) ---
+
+export async function refundOrder(params: {
+  orderNo: string;
+  operatorId: string;
+  reason?: string;
+  deductCredits?: number; // defaults to the credits this order granted
+  cancelSubscription?: boolean;
+}) {
+  const { orderNo, operatorId, reason } = params;
+
+  const [existingOrder] = await db()
+    .select()
+    .from(order)
+    .where(and(eq(order.orderNo, orderNo), isNull(order.deletedAt)))
+    .limit(1);
+  if (!existingOrder) throw new Error('Order not found');
+
+  const staleBefore = new Date(Date.now() - REFUND_STALE_MS);
+  if (
+    existingOrder.status !== OrderStatus.PAID &&
+    !(
+      existingOrder.status === OrderStatus.REFUNDING &&
+      existingOrder.updatedAt < staleBefore
+    )
+  ) {
+    throw new Error(
+      existingOrder.status === OrderStatus.REFUNDING
+        ? 'A refund for this order is already in progress'
+        : `Only paid orders can be refunded (status: ${existingOrder.status})`
+    );
+  }
+
+  // Resolve the provider BEFORE claiming. getProvider() falls back to the
+  // default provider, so check the name — never refund through the wrong one.
+  const paidAmount = existingOrder.paymentAmount ?? existingOrder.amount;
+  const pm = await getPaymentManager();
+  const provider = pm.getProvider(existingOrder.paymentProvider);
+  if (paidAmount > 0) {
+    if (
+      !provider ||
+      provider.name !== existingOrder.paymentProvider ||
+      !provider.refundPayment
+    ) {
+      throw new Error(
+        `Refund is not supported for provider '${existingOrder.paymentProvider}' (not configured or no refund API)`
+      );
+    }
+  }
+
+  // 1. Claim the order so a double click can't refund twice. The token
+  //    check works on every dialect without relying on affected-row counts.
+  const claim = JSON.stringify({ claim: getUuid() });
+  await db()
+    .update(order)
+    .set({ status: OrderStatus.REFUNDING, refundResult: claim })
+    .where(
+      and(
+        eq(order.id, existingOrder.id),
+        or(
+          eq(order.status, OrderStatus.PAID),
+          and(
+            eq(order.status, OrderStatus.REFUNDING),
+            lt(order.updatedAt, staleBefore)
+          )
+        )
+      )
+    );
+  const [claimed] = await db()
+    .select({ refundResult: order.refundResult })
+    .from(order)
+    .where(eq(order.id, existingOrder.id))
+    .limit(1);
+  if (claimed?.refundResult !== claim) {
+    throw new Error('A refund for this order is already in progress');
+  }
+
+  // 2. Refund at the provider. On failure, release the claim.
+  let refund: PaymentRefund | null = null;
+  if (paidAmount > 0 && provider?.refundPayment) {
+    try {
+      refund = await provider.refundPayment({
+        orderNo: existingOrder.orderNo,
+        sessionId: existingOrder.paymentSessionId || undefined,
+        transactionId: existingOrder.transactionId || undefined,
+        invoiceId: existingOrder.invoiceId || undefined,
+        paymentType: existingOrder.paymentType || undefined,
+        amount: existingOrder.amount,
+        currency: existingOrder.currency,
+        reason,
+      });
+    } catch (error) {
+      await db()
+        .update(order)
+        .set({ status: OrderStatus.PAID, refundResult: null })
+        .where(
+          and(eq(order.id, existingOrder.id), eq(order.refundResult, claim))
+        );
+      throw error;
+    }
+  }
+
+  // 3. Atomically deduct credits + mark the order refunded.
+  const creditsToDeduct = Math.max(
+    0,
+    Math.floor(params.deductCredits ?? existingOrder.creditsAmount ?? 0)
+  );
+  const refundAmount = refund?.amount ?? paidAmount;
+  let creditsDeducted = 0;
+  try {
+    const deduction = await planDeductForRefund({
+      userId: existingOrder.userId,
+      userEmail: existingOrder.userEmail || '',
+      orderNo: existingOrder.orderNo,
+      credits: creditsToDeduct,
+      description: `Refund ${existingOrder.orderNo}`,
+    });
+    await atomic((q) => [
+      guard({
+        table: order,
+        column: 'userId',
+        where: eq(order.id, existingOrder.id),
+        require: and(
+          eq(order.status, OrderStatus.REFUNDING),
+          eq(order.refundResult, claim)
+        )!,
+        message: 'Order refund claim lost',
+      }),
+      ...deduction.steps(q),
+      q
+        .update(order)
+        .set({
+          status: OrderStatus.REFUNDED,
+          refundAmount,
+          refundedAt: new Date(),
+          refundResult: JSON.stringify({
+            refundId: refund?.refundId || null,
+            status: refund?.status || 'succeeded',
+            reason: reason || '',
+            operatorId,
+            creditsDeducted: deduction.deducted,
+            providerResult: refund?.refundResult ?? null,
+          }),
+        })
+        .where(eq(order.id, existingOrder.id)),
+    ]);
+    creditsDeducted = deduction.deducted;
+  } catch (error: any) {
+    // The provider has already refunded; leave the order in REFUNDING so it
+    // can be retried (idempotently) instead of looking like a paid order.
+    throw new Error(
+      `Refund was issued at the provider but saving it failed: ${error?.message || error}. Retry in a few minutes.`
+    );
+  }
+
+  // 4. Optionally cancel the subscription — best effort, after the refund
+  //    is recorded, so a cancel failure never hides a completed refund.
+  let subscriptionCanceled = false;
+  let subscriptionError: string | undefined;
+  if (params.cancelSubscription && existingOrder.subscriptionNo) {
+    try {
+      const sub = await findBySubscriptionNo(existingOrder.subscriptionNo);
+      if (
+        sub &&
+        sub.status !== SubscriptionStatus.CANCELED &&
+        sub.status !== SubscriptionStatus.EXPIRED
+      ) {
+        const subProvider = pm.getProvider(sub.paymentProvider);
+        if (
+          !subProvider ||
+          subProvider.name !== sub.paymentProvider ||
+          !subProvider.cancelSubscription
+        ) {
+          throw new Error('Cancellation not supported for this provider');
+        }
+        const session = await subProvider.cancelSubscription({
+          subscriptionId: sub.subscriptionId,
+        });
+        const info = session.subscriptionInfo;
+        await updateBySubscriptionNo(sub.subscriptionNo, {
+          status: info?.status || SubscriptionStatus.CANCELED,
+          canceledAt: info?.canceledAt || new Date(),
+          canceledEndAt: info?.canceledEndAt || null,
+          canceledReason: reason || 'Refunded by admin',
+          canceledReasonType: 'refund',
+        });
+      }
+      subscriptionCanceled = true;
+    } catch (error: any) {
+      subscriptionError = error?.message || String(error);
+    }
+  }
+
+  return {
+    orderNo: existingOrder.orderNo,
+    refundId: refund?.refundId || null,
+    refundStatus: refund?.status || 'succeeded',
+    refundAmount,
+    creditsDeducted,
+    creditsRequested: creditsToDeduct,
+    subscriptionCanceled,
+    subscriptionError,
+  };
 }
 
 // --- Query helpers ---

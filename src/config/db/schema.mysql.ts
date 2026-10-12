@@ -36,6 +36,14 @@ export const user = table(
     utmSource: varchar('utm_source', { length: 100 }).notNull().default(''),
     ip: varchar('ip', { length: 45 }).notNull().default(''),
     locale: varchar('locale', { length: 20 }).notNull().default(''),
+    utmCampaign: varchar('utm_campaign', { length: 100 }).notNull().default(''),
+    utmTerm: varchar('utm_term', { length: 100 }).notNull().default(''),
+    utmMedium: varchar('utm_medium', { length: 100 }).notNull().default(''),
+    utmContent: varchar('utm_content', { length: 100 }).notNull().default(''),
+    referrer: varchar('referrer', { length: 500 }).notNull().default(''),
+    country: varchar('country', { length: 10 }).notNull().default(''),
+    // 'user' = a person; 'api' = an agent/service account (no login, keys only).
+    type: varchar('type', { length: 20 }).notNull().default('user'),
   },
   (table) => [
     index('idx_user_name').on(table.name),
@@ -205,6 +213,9 @@ export const order = table(
     transactionId: varchar191('transaction_id'),
     paymentUserName: varchar191('payment_user_name'),
     paymentUserId: varchar191('payment_user_id'),
+    refundAmount: int('refund_amount'),
+    refundedAt: timestamp('refunded_at'),
+    refundResult: text('refund_result'),
   },
   (table) => [
     index('idx_order_user_status_payment_type').on(
@@ -324,6 +335,9 @@ export const apikey = table(
     createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at').defaultNow().onUpdateNow().notNull(),
     deletedAt: timestamp('deleted_at'),
+    // 'user' = product API key (sk_); 'admin' = admin/agent API key (sa_admin_).
+    type: varchar('type', { length: 20 }).notNull().default('user'),
+    expiresAt: timestamp('expires_at'), // null = never expires
   },
   (table) => [
     index('idx_apikey_user_status').on(table.userId, table.status),
@@ -561,3 +575,49 @@ export type NewTicketMessage = typeof ticketMessage.$inferInsert;
 
 // ─── Custom tables ───────────────────────────────────────────────────────────
 // Add your own tables below this line.
+
+// Agent administration: durable execution journal. Agents are `user.type = 'api'`
+// accounts whose credentials are `apikey.type = 'admin'` rows; tokenId → apikey.id.
+export const adminExecution = table(
+  'admin_execution',
+  {
+    id: varchar191('id').primaryKey(),
+    userId: varchar191('user_id').notNull(),
+    tokenId: varchar191('token_id'),
+    operation: varchar191('operation').notNull(),
+    inputHash: varchar191('input_hash').notNull(),
+    targetId: varchar191('target_id'),
+    status: varchar191('status').notNull(),
+    response: longtext('response'),
+    createdAt: timestamp('created_at').notNull(),
+    completedAt: timestamp('completed_at'),
+  },
+  (t) => [index('idx_admin_execution_created').on(t.createdAt)]
+);
+
+export type AdminExecution = typeof adminExecution.$inferSelect;
+
+// Product events (paywall hits, plan picks, risk flags …) that no other table
+// records. Kinds are registered in src/config/events.ts; written through
+// recordEvent() (server) or track() (client, registered kinds only). Shown in
+// the admin user timeline next to orders, credits and tasks.
+export const userEvent = table(
+  'user_event',
+  {
+    id: varchar191('id').primaryKey(),
+    userId: varchar191('user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    kind: varchar191('kind').notNull(),
+    detail: text('detail'),
+    source: varchar191('source').notNull(), // server | client
+    createdAt: timestamp('created_at', { fsp: 3 }).notNull(),
+  },
+  (t) => [
+    index('idx_user_event_user_created').on(t.userId, t.createdAt),
+    index('idx_user_event_kind_created').on(t.kind, t.createdAt),
+  ]
+);
+
+export type UserEvent = typeof userEvent.$inferSelect;
+export type NewUserEvent = typeof userEvent.$inferInsert;

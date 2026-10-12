@@ -178,8 +178,10 @@ export async function getUserPermissionCodes(
   const roles = await db()
     .select({ roleId: userRole.roleId })
     .from(userRole)
+    .innerJoin(role, eq(userRole.roleId, role.id))
     .where(
       and(
+        eq(role.status, 'active'),
         eq(userRole.userId, userId),
         or(isNull(userRole.expiresAt), gt(userRole.expiresAt, now))
       )
@@ -232,5 +234,28 @@ export async function grantRoleForNewUser(params: {
   const foundRole = await getRoleByName(roleName);
   if (!foundRole) return;
 
+  // Anyone can sign up, so the signup role must never carry admin rights —
+  // checked here, at grant time, so permissions added to the role later count.
+  if (await roleGrantsAdmin(foundRole.id)) {
+    console.error(
+      `initial role "${roleName}" carries admin permissions; not assigned`
+    );
+    return;
+  }
+
   await assignRoleToUser(userId, foundRole.id);
+}
+
+/** Whether a permission code reaches the admin panel (`*`, `admin`, `admin.*`…). */
+export function isAdminPermission(code: string) {
+  return code === '*' || code === 'admin' || code.startsWith('admin.');
+}
+
+export async function roleGrantsAdmin(roleId: string): Promise<boolean> {
+  const rows: { code: string }[] = await db()
+    .select({ code: permission.code })
+    .from(rolePermission)
+    .innerJoin(permission, eq(rolePermission.permissionId, permission.id))
+    .where(eq(rolePermission.roleId, roleId));
+  return rows.some((r) => isAdminPermission(r.code));
 }

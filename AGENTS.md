@@ -77,7 +77,9 @@ src/
 │   ├── apikeys/service.ts       # API key CRUD + validation
 │   ├── rbac/service.ts          # Role/permission checks, wildcard matching
 │   ├── config/service.ts        # DB key-value config with 1h cache
-│   └── ai-tasks/service.ts      # AI task tracking with credit deduction/revocation
+│   ├── ai-tasks/service.ts      # AI task tracking with credit deduction/revocation
+│   ├── notify/service.ts        # Bot notifications (paid orders) + client-safe templates.ts
+│   └── events/service.ts        # Product events (recordEvent) shown in the admin user timeline
 │
 ├── config/
 │   ├── index.ts                 # All env vars (app, db, auth, stripe, resend, storage, ai, locale)
@@ -144,6 +146,7 @@ API routes are thin server-route wrappers — they check auth, parse params, cal
 - Modules depend on `core/`, `config/`, `lib/`, and `drizzle-orm` — never on other modules' internals
 - Exception: `payment/service.ts` calls `credits/` and `subscriptions/` because payment success triggers credit granting and subscription creation. This is the ONE allowed cross-module dependency.
 - `ai-tasks/service.ts` calls `credits/` for consumption/revocation. This is the second.
+- `payment/service.ts` also calls `notify/` to push a bot message (Telegram/Feishu/WeCom, configured in the admin Notify tab) after a paid order commits. Channel senders live in `@/core/notify`.
 - All other modules are fully independent.
 
 ## Key Patterns
@@ -370,6 +373,75 @@ const rows = await db()
   .where(eq(someTable.userId, id));
 ```
 
+### Atomic writes (money, credits, anything multi-statement)
+
+**Never use `db().transaction()` for writes that must succeed together.** D1 has
+no interactive transactions, and on D1 `transaction()` just runs the callback
+statement by statement. A failure halfway leaves partial data, such as a paid
+order with no credits. Use `atomic()` from `@/core/db/atomic` instead. It runs
+the steps as one `batch()` on D1/SQLite/Turso and as a real transaction on
+Postgres/MySQL:
+
+```ts
+import { atomic, AtomicGuardError, guard } from '@/core/db/atomic';
+
+// 1. Read everything first, and decide in JS (no reads between writes).
+// 2. Build every write up front from `q` (never `db()`), and state each
+//    condition as a guard instead of an `if`.
+try {
+  await atomic((q) => [
+    guard({
+      table: order,
+      column: 'userId', // any NOT NULL column of `table`
+      where: eq(order.id, id),
+      require: eq(order.status, 'created'), // must hold for every matched row
+      message: 'Order already settled',
+    }),
+    q.update(order).set({ status: 'paid' }).where(eq(order.id, id)),
+    credits > 0 && q.insert(credit).values(newCredit), // falsy steps are skipped
+  ]);
+} catch (e) {
+  if (e instanceof AtomicGuardError) return; // lost the race: already handled
+  throw e;
+}
+```
+
+- Guards see the earlier steps' writes. Use them as preconditions (claim a
+  row before updating it) or postconditions (`remaining_credits >= 0` after a
+  relative decrement).
+- Prefer relative updates (``sql`${col} - ${n}` ``) plus a guard over writing
+  values computed from a stale read.
+- Credits: `planConsume()` / `planDeductForRefund()` return steps you can
+  bundle into your own `atomic()` call (see `ai-tasks/service.ts`).
+- D1 limits: at most **100 bound parameters per statement**, so chunk large
+  `inArray` lists (≤ 90) and multi-row inserts. Keep a batch to a modest number
+  of statements.
+- Test on the D1 path: `pnpm test:atomic` (SQLite batch),
+  `pnpm test:atomic:d1` (real local D1 via wrangler), and
+  `ATOMIC_PG_URL=… pnpm test:atomic:pg` (Postgres transaction).
+
+### Product events (admin user timeline)
+
+The admin user detail page shows a timeline of everything a user did. Orders,
+subscriptions, credits, AI tasks and tickets appear automatically. For
+anything else:
+
+- **Nothing records it yet** (paywall hit, plan picked, risk flag): register
+  the kind in `src/config/events.ts`, then record it.
+  - Server: `await recordEvent({ userId, kind, detail })` from
+    `@/modules/events/service`. It never throws. Call it from the API route,
+    not from another module's service, because modules don't import each
+    other.
+  - Browser: `track(kind, detail)` from `@/lib/track`, only for kinds marked
+    `client: true`. Never mark money, risk or permission events `client`,
+    because anyone can send those.
+  - `detail` is flat: at most 10 keys of short strings, numbers or booleans.
+    Never put secrets or personal data in it.
+- **Already a row in your own table**: add a source to
+  `src/server/admin/timeline-sources.ts` instead of recording it twice.
+- Label each kind with `admin.user_detail.timeline_<kind>` in both
+  `messages/en.json` and `messages/zh.json`.
+
 ### shadcn/ui v4 (Base Nova)
 
 - **No `asChild` prop.** Use `className={cn(buttonVariants())}` on Link instead.
@@ -410,6 +482,63 @@ The split is not cosmetic — it's **what survives a rebrand**. Primitives survi
 7. **Need a static page?** Add an MDX file at `src/content/pages/<slug>.{en,zh}.mdx` plus a thin route file `src/routes/(pages)/<slug>.tsx` using `staticPageRouteOptions('<slug>')` from `(pages)/-static-page.tsx`
 
 Or use skills: `/new-module`, `/new-page`, `/new-static-page`
+
+## Security & Integrity Rules for New Features
+
+These come from real findings. Follow them for every feature that touches
+money, credits, permissions, secrets, or user input:
+
+1. **Money and credits**
+   - Never trust a price, amount, credits or plan from the request; look them
+     up in the server catalog (`src/config/pricing.ts`).
+   - Charge each provider in its own currency, and never reuse a USD amount as
+     CNY.
+   - Every write that grants or takes away value goes through `atomic()` with
+     a claim guard, so retries and concurrent webhooks act exactly once.
+   - Back the claim with a database unique key (e.g. `grant_<orderNo>`) so
+     that a status edit can't make it run twice.
+   - Money states (`paid`, `refunding`, `refunded`) change only through the
+     payment flows. Admin edit endpoints must not set them or move an order
+     out of them.
+2. **Webhooks and callbacks**
+   - A valid signature only proves the provider sent the message. Also check
+     that it is for **this** merchant/app (`app_id`, `mchid`, account) and that
+     the amount and currency match the order before settling.
+   - Make every handler idempotent.
+3. **Permissions**
+   - Every new admin operation gets its own permission code.
+   - Actions that move money or grant privileges (refunds, credits, roles,
+     settings) get a **dedicated** code that is listed explicitly in seeds,
+     never reached through a wildcard such as `admin.payments.*`.
+   - Code that assigns roles or permissions must reject anything beyond the
+     caller's own permissions (`beyondCeiling` in `src/server/admin/ceiling.ts`).
+4. **Secrets**
+   - Store secrets through `saveConfigs` (encrypted at rest) and return them
+     only masked.
+   - If a setting is a URL that a saved secret gets sent to, add it to
+     `ENDPOINT_SECRETS` in `src/modules/config/service.ts`. Changing the URL
+     then requires re-entering the secret.
+   - Never log or echo keys. Agent keys are hash-only and shown once.
+5. **Abuse limits**
+   - Rate-limit with `enforceMinIntervalRateLimit`: by IP before auth, then
+     again with `extraKey: session.user.id` after auth. Never key on cookies.
+   - Uploads: allow-list MIME types (no SVG), and cap file count, per-file size
+     and total size.
+   - A setting that becomes a `<script src>` or other executable URL needs a
+     host allow-list taken from deployment env, not from settings. "https"
+     alone is not trust.
+6. **Accounts**
+   - Don't auto-link or auto-verify identities. Keep better-auth's
+     `requireLocalEmailVerified`.
+   - Agent and service accounts are `user.type = 'api'`. Exclude them from user
+     lists and analytics.
+7. **Tests**
+   - Add a test under `tests/` for any change to money, credits or permissions,
+     including the concurrent case.
+
+When a change requires existing projects to act (schema, env, permission
+codes, renamed exports, user-visible behavior), add an entry to
+`UPGRADING.md` in the same change.
 
 ## Agent Skills
 
@@ -525,6 +654,8 @@ Keep `.env.example` minimal; don't add provider keys to it.
 7. **Always verify `pnpm build` passes** after making changes
 8. **Return `respData`/`respErr`** from API routes
 9. **Run the `security-scan` skill before every `git commit`** — it checks for leaked secrets, injection/XSS/logic vulnerabilities in the diff, and `.gitignore`/`.dockerignore` gaps. HIGH findings block the commit.
+10. **Multi-statement writes use `atomic()`, never `db().transaction()`.** The latter is not atomic on D1. See "Atomic writes".
+11. **Upgrading a project from newer template code?** Follow `UPGRADING.md`. **Changing the template in a way existing projects must act on?** Add an entry there.
 
 ## Cloud Sandbox Notes (ShipAny Code / e2b)
 

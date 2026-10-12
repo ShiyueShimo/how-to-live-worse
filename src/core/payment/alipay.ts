@@ -8,8 +8,11 @@ import {
   PaymentInterval,
   PaymentOrder,
   PaymentProvider,
+  PaymentRefund,
+  PaymentRefundRequest,
   PaymentSession,
   PaymentStatus,
+  RefundStatus,
   SubscriptionCycleType,
   SubscriptionInfo,
   SubscriptionStatus,
@@ -55,6 +58,13 @@ export class AlipayProvider implements PaymentProvider {
   }): Promise<CheckoutSession> {
     if (!order.price) {
       throw new Error('Price is required for Alipay payment');
+    }
+    // Alipay only charges CNY; sending a USD amount would bill the same number
+    // in yuan (149 USD → ¥149), so refuse anything that isn't priced in CNY.
+    if (order.price.currency?.toLowerCase() !== 'cny') {
+      throw new Error(
+        `Alipay only supports CNY, got ${order.price.currency || 'none'}`
+      );
     }
 
     const outTradeNo = order.orderNo || `ALI${Date.now()}`;
@@ -158,6 +168,12 @@ export class AlipayProvider implements PaymentProvider {
       throw new Error('Invalid Alipay notification signature');
     }
 
+    // A valid signature only proves Alipay sent it — not that it was for this
+    // app. Notifications for another merchant's app must never settle our orders.
+    if (params.app_id !== this.configs.appId) {
+      throw new Error('Alipay notification is for a different app_id');
+    }
+
     const tradeStatus = params.trade_status;
     let eventType: PaymentEventType;
 
@@ -205,6 +221,36 @@ export class AlipayProvider implements PaymentProvider {
       eventType,
       eventResult: params,
       paymentSession,
+    };
+  }
+
+  /**
+   * Full refund. out_request_no makes retries idempotent on Alipay's side.
+   * @docs https://opendocs.alipay.com/open/f60979b3_alipay.trade.refund
+   */
+  async refundPayment(request: PaymentRefundRequest): Promise<PaymentRefund> {
+    const bizContent: Record<string, string> = {
+      refund_amount: (request.amount / 100).toFixed(2),
+      out_request_no: `refund_${request.orderNo}`,
+    };
+    if (request.transactionId) bizContent.trade_no = request.transactionId;
+    else bizContent.out_trade_no = request.sessionId || request.orderNo;
+    if (request.reason) bizContent.refund_reason = request.reason.slice(0, 256);
+
+    const result = await this.execute('alipay.trade.refund', bizContent);
+    const response = result.alipay_trade_refund_response;
+    if (!response || response.code !== '10000') {
+      throw new Error(response?.sub_msg || response?.msg || 'Refund failed');
+    }
+
+    return {
+      refundId: response.trade_no,
+      status:
+        response.fund_change === 'Y'
+          ? RefundStatus.SUCCEEDED
+          : RefundStatus.PENDING,
+      amount: Math.round(parseFloat(response.refund_fee || '0') * 100),
+      refundResult: response,
     };
   }
 

@@ -1,35 +1,24 @@
 import { drizzle } from 'drizzle-orm/mysql2';
 import mysql from 'mysql2';
 
+import { getHyperdriveConnectionString, isCloudflareWorker } from './runtime';
 import type { DbConfig } from './types';
-
-const isCloudflareWorker =
-  typeof globalThis !== 'undefined' && 'Cloudflare' in globalThis;
 
 // Global database connection instance (singleton pattern)
 let dbInstance: ReturnType<typeof drizzle> | null = null;
 let pool: ReturnType<typeof mysql.createPool> | null = null;
 
 export function createMysqlDb(config: DbConfig) {
-  let databaseUrl = config.database_url;
-
-  let isHyperdrive = false;
-
-  if (isCloudflareWorker) {
-    const { env }: { env: any } = { env: {} };
-    isHyperdrive = 'HYPERDRIVE' in env;
-
-    if (isHyperdrive) {
-      const hyperdrive = env.HYPERDRIVE;
-      databaseUrl = hyperdrive.connectionString;
-    }
-  }
+  // Prefer the Hyperdrive binding on Workers (stashed on globalThis by
+  // src/server.ts).
+  const databaseUrl = getHyperdriveConnectionString() || config.database_url;
 
   if (!databaseUrl) {
     throw new Error('DATABASE_URL is not set');
   }
 
-  // In Cloudflare Workers, create new connection each time
+  // In Cloudflare Workers, one connection per request (db() caches it in the
+  // request scope).
   if (isCloudflareWorker) {
     const client = mysql.createConnection({
       uri: databaseUrl,

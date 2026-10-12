@@ -63,17 +63,67 @@ export function getCookieFromCtx(ctx: any, name: string): string | undefined {
   return getCookieFromHeader(cookieHeader, name);
 }
 
+// cf-connecting-ip is set by Cloudflare and can't be spoofed by the client;
+// the first x-forwarded-for entry can. Prefer it, fall back for other hosts.
 export function getClientIpFromCtx(ctx: any): string {
+  const cfIp = getHeaderValue(ctx, 'cf-connecting-ip');
+  if (cfIp) return cfIp;
   const forwarded = getHeaderValue(ctx, 'x-forwarded-for');
   if (forwarded) {
     const first = forwarded.split(',')[0]?.trim();
     if (first) return first;
   }
-  return (
-    getHeaderValue(ctx, 'cf-connecting-ip') ||
-    getHeaderValue(ctx, 'x-real-ip') ||
-    ''
-  );
+  return getHeaderValue(ctx, 'x-real-ip') || '';
+}
+
+/**
+ * Keep letters (any script), digits, spaces and `._-` — enough for campaign
+ * names and search keywords, nothing that could break a cookie or a message.
+ */
+export function sanitizeUtm(value: string): string {
+  return value
+    .replace(/[^\p{L}\p{N}\s._-]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 100);
+}
+
+export const REFERRER_COOKIE = 'first_referrer';
+
+/**
+ * Normalize an external referrer to `origin + pathname` (query/hash dropped —
+ * they can carry tokens or PII). Returns '' for non-http(s) referrers and for
+ * `selfHosts` (internal navigation). Also re-validates the cookie at sign-up.
+ */
+export function sanitizeReferrer(
+  value: string,
+  selfHosts: string[] = []
+): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return '';
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return '';
+  if (selfHosts.includes(url.host)) return '';
+  const path = url.pathname === '/' ? '' : url.pathname;
+  return `${url.origin}${path}`.slice(0, 500);
+}
+
+/**
+ * ISO 3166-1 alpha-2 country code from the edge/CDN geo header, or '' when
+ * not behind one (e.g. localhost). Cloudflare, Vercel and CloudFront supported.
+ */
+export function getCountryFromCtx(ctx: any): string {
+  const code =
+    getHeaderValue(ctx, 'cf-ipcountry') ||
+    getHeaderValue(ctx, 'x-vercel-ip-country') ||
+    getHeaderValue(ctx, 'cloudfront-viewer-country') ||
+    '';
+  const normalized = code.trim().toUpperCase();
+  // Cloudflare uses XX (unknown) and T1 (Tor) as sentinels.
+  return /^[A-Z]{2}$/.test(normalized) && normalized !== 'XX' ? normalized : '';
 }
 
 export function guessLocaleFromAcceptLanguage(

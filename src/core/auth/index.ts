@@ -3,6 +3,7 @@ import { drizzleAdapter } from 'better-auth/adapters/drizzle';
 import { oneTap } from 'better-auth/plugins';
 
 import { db } from '@/core/db';
+import { isCloudflareWorker, TCP_PROVIDERS } from '@/core/db/runtime';
 import type { EmailProvider } from '@/core/email';
 import { CloudflareEmailProvider } from '@/core/email/cloudflare';
 import { ResendProvider } from '@/core/email/resend';
@@ -15,8 +16,12 @@ import { grantRoleForNewUser } from '@/modules/rbac/service';
 import {
   getClientIpFromCtx,
   getCookieFromCtx,
+  getCountryFromCtx,
   getHeaderValue,
   guessLocaleFromAcceptLanguage,
+  REFERRER_COOKIE,
+  sanitizeReferrer,
+  sanitizeUtm,
 } from '@/lib/cookie';
 import { getUuid } from '@/lib/hash';
 
@@ -56,13 +61,7 @@ function getDatabaseProvider(provider: string): 'sqlite' | 'pg' | 'mysql' {
 // mysql client in at construction, so a cached auth instance makes an OAuth
 // callback query `verification` with the initiating request's client —
 // better-auth swallows the error as please_restart_the_process. Rebuild per
-// request on Workers; db() already hands out a fresh client there.
-const isCloudflareWorker =
-  (typeof navigator !== 'undefined' &&
-    navigator.userAgent === 'Cloudflare-Workers') ||
-  (typeof globalThis !== 'undefined' && 'Cloudflare' in globalThis);
-
-const TCP_PROVIDERS = ['postgresql', 'postgres', 'mysql'];
+// request on Workers; db() hands out that request's own client there.
 
 const canCacheAuthInstance = !(
   isCloudflareWorker && TCP_PROVIDERS.includes(envConfigs.database_provider)
@@ -232,6 +231,15 @@ export function getAuth(configs?: Record<string, string>) {
     }),
     socialProviders,
     plugins: getAuthPlugins(configs),
+    account: {
+      accountLinking: {
+        // Never attach an OAuth sign-in to a password account whose email was
+        // never proven: otherwise anyone could pre-register a victim's email,
+        // wait for them to "Sign in with Google", and keep the password.
+        // (The better-auth default since 1.7; pinned so it can't regress.)
+        requireLocalEmailVerified: true,
+      },
+    },
     user: {
       additionalFields: {
         utmSource: {
@@ -247,22 +255,76 @@ export function getAuth(configs?: Record<string, string>) {
           required: false,
           defaultValue: '',
         },
+        utmCampaign: {
+          type: 'string',
+          input: false,
+          required: false,
+          defaultValue: '',
+        },
+        utmTerm: {
+          type: 'string',
+          input: false,
+          required: false,
+          defaultValue: '',
+        },
+        utmMedium: {
+          type: 'string',
+          input: false,
+          required: false,
+          defaultValue: '',
+        },
+        utmContent: {
+          type: 'string',
+          input: false,
+          required: false,
+          defaultValue: '',
+        },
+        referrer: {
+          type: 'string',
+          input: false,
+          required: false,
+          defaultValue: '',
+        },
+        country: {
+          type: 'string',
+          input: false,
+          required: false,
+          defaultValue: '',
+        },
       },
     },
     databaseHooks: {
       user: {
         create: {
           before: async (userData: any, ctx: any) => {
-            let utmSource = getCookieFromCtx(ctx, 'utm_source') || '';
-            try {
-              utmSource = decodeURIComponent(utmSource);
-            } catch {}
-            utmSource = utmSource.replace(/[^\w.\-]/g, '').slice(0, 100);
+            const utm = (name: string) => {
+              let value = getCookieFromCtx(ctx, name) || '';
+              try {
+                value = decodeURIComponent(value);
+              } catch {}
+              return sanitizeUtm(value);
+            };
 
             return {
               data: {
                 ...userData,
-                utmSource,
+                utmSource: utm('utm_source'),
+                utmCampaign: utm('utm_campaign'),
+                utmTerm: utm('utm_term'),
+                utmMedium: utm('utm_medium'),
+                utmContent: utm('utm_content'),
+                referrer: (() => {
+                  try {
+                    return sanitizeReferrer(
+                      decodeURIComponent(
+                        getCookieFromCtx(ctx, REFERRER_COOKIE) || ''
+                      )
+                    );
+                  } catch {
+                    return '';
+                  }
+                })(),
+                country: getCountryFromCtx(ctx),
                 ip: getClientIpFromCtx(ctx).slice(0, 100),
                 locale: guessLocaleFromAcceptLanguage(
                   getHeaderValue(ctx, 'accept-language')

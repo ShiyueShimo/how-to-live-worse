@@ -1,13 +1,8 @@
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 
+import { getHyperdriveConnectionString, isCloudflareWorker } from './runtime';
 import type { DbConfig } from './types';
-
-// workerd sets navigator.userAgent — the documented Workers runtime detection.
-const isCloudflareWorker =
-  (typeof navigator !== 'undefined' &&
-    navigator.userAgent === 'Cloudflare-Workers') ||
-  (typeof globalThis !== 'undefined' && 'Cloudflare' in globalThis);
 
 // Global database connection instance (singleton pattern)
 let dbInstance: ReturnType<typeof drizzle> | null = null;
@@ -22,31 +17,31 @@ export function createPostgresDb(config: DbConfig) {
       ? { connection: { options: `-c search_path=${schemaName}` } }
       : {};
 
-  if (isCloudflareWorker) {
-    // Prefer the Hyperdrive binding — direct Workers→Postgres pays a full
-    // TCP+TLS+auth handshake per connection; Hyperdrive pools at the edge.
-    // The binding env is stashed on globalThis by src/server.ts (same pattern
-    // as the D1 binding in d1.ts). Configure via wrangler.jsonc:
-    //   "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "..." }]
-    const g = globalThis as any;
-    const env = g.__CF_ENV__ ?? g.__env__;
-    const hyperdrive = env?.HYPERDRIVE as
-      | { connectionString: string }
-      | undefined;
-    if (hyperdrive?.connectionString) {
-      databaseUrl = hyperdrive.connectionString;
-    }
-  }
+  // Prefer the Hyperdrive binding on Workers — direct Workers→Postgres pays a
+  // full TCP+TLS+auth handshake per connection; Hyperdrive pools at the edge.
+  databaseUrl = getHyperdriveConnectionString() || databaseUrl;
 
   if (!databaseUrl) {
     throw new Error('DATABASE_URL is not set');
   }
 
-  // In Cloudflare Workers, create new connection each time
+  // In Cloudflare Workers, one client per request (db() caches it in the
+  // request scope). Options follow Cloudflare's Hyperdrive + postgres.js
+  // guidance. No explicit end(): SSR responses stream and deferred loaders
+  // may still query after fetch() returns; workerd closes the request's
+  // sockets when it finishes.
   if (isCloudflareWorker) {
     const client = postgres(databaseUrl, {
-      prepare: false,
-      max: 1,
+      // Workers allow at most 6 concurrent outbound connections per request.
+      max: 5,
+      // Skip the pg_type lookup on every new connection (an origin round
+      // trip). Safe while the schema has no array columns — re-check if you
+      // add one.
+      fetch_types: false,
+      // Hyperdrive supports prepared statements; prepare:false can make
+      // queries hang or fail intermittently there. (The Node branches below
+      // keep prepare:false for pgbouncer/Supabase transaction poolers.)
+      prepare: true,
       idle_timeout: 10,
       connect_timeout: 5,
       ...connectionSchemaOptions,

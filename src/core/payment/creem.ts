@@ -10,8 +10,11 @@ import {
   PaymentInterval,
   PaymentOrder,
   PaymentProvider,
+  PaymentRefund,
+  PaymentRefundRequest,
   PaymentSession,
   PaymentStatus,
+  RefundStatus,
   SubscriptionCycleType,
   SubscriptionInfo,
   SubscriptionStatus,
@@ -255,6 +258,34 @@ export class CreemProvider implements PaymentProvider {
     }
   }
 
+  /**
+   * Full refund of a transaction.
+   * @docs https://docs.creem.io/api-reference/endpoint/refund-payment
+   */
+  async refundPayment(request: PaymentRefundRequest): Promise<PaymentRefund> {
+    const transactionId = request.transactionId || request.invoiceId;
+    if (!transactionId) {
+      throw new Error('No Creem transaction id on this order');
+    }
+
+    const result = await this.makeRequest('/v1/refunds', 'POST', {
+      transaction_id: transactionId,
+    });
+
+    if (result.status === 'failed' || result.status === 'canceled') {
+      throw new Error(`Creem refund ${result.status}`);
+    }
+
+    return {
+      refundId: result.id,
+      status:
+        result.status === 'succeeded'
+          ? RefundStatus.SUCCEEDED
+          : RefundStatus.PENDING,
+      refundResult: result,
+    };
+  }
+
   private async generateSignature(
     payload: string,
     secret: string
@@ -301,8 +332,9 @@ export class CreemProvider implements PaymentProvider {
 
     const response = await fetch(url, config);
     if (!response.ok) {
+      const detail = await response.text().catch(() => '');
       throw new Error(
-        `request creem api failed with status: ${response.status}`
+        `request creem api failed with status: ${response.status}${detail ? ` ${detail.slice(0, 300)}` : ''}`
       );
     }
 

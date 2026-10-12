@@ -67,6 +67,7 @@ export async function list(
 ) {
   const conditions: SQL[] = [
     eq(apikey.userId, userId),
+    eq(apikey.type, 'user'),
     eq(apikey.status, 'active'),
     isNull(apikey.deletedAt) as unknown as SQL,
   ];
@@ -117,7 +118,13 @@ export async function remove(params: { userId: string; keyId: string }) {
   await db()
     .update(apikey)
     .set({ status: 'deleted', deletedAt: new Date() })
-    .where(and(eq(apikey.id, keyId), eq(apikey.userId, userId)));
+    .where(
+      and(
+        eq(apikey.id, keyId),
+        eq(apikey.userId, userId),
+        eq(apikey.type, 'user')
+      )
+    );
 }
 
 /**
@@ -132,6 +139,8 @@ export async function validate(key: string): Promise<string | null> {
     .where(
       and(
         eq(apikey.keyHash, keyHash),
+        // Admin/agent keys (type 'admin') never authenticate the product API.
+        eq(apikey.type, 'user'),
         eq(apikey.status, 'active'),
         isNull(apikey.deletedAt)
       )

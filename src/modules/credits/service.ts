@@ -1,6 +1,24 @@
-import { and, asc, desc, eq, gt, isNull, or, sql, sum } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gt,
+  gte,
+  inArray,
+  isNull,
+  or,
+  sql,
+  sum,
+} from 'drizzle-orm';
 
 import { db } from '@/core/db';
+import {
+  atomic,
+  AtomicGuardError,
+  guard,
+  type AtomicStep,
+} from '@/core/db/atomic';
 import { credit } from '@/config/db/schema';
 import { getSnowId, getUuid } from '@/lib/hash';
 
@@ -23,6 +41,7 @@ export enum CreditTransactionScene {
   RENEWAL = 'renewal',
   GIFT = 'gift',
   REWARD = 'reward',
+  REFUND = 'refund',
 }
 
 type NewCredit = typeof credit.$inferInsert;
@@ -102,17 +121,44 @@ export async function grant(params: {
   return newCredit;
 }
 
-// --- Consume (FIFO with batching) ---
+// --- Consume (FIFO) ---
 
-export async function consume(params: {
+/**
+ * Guards: none of these grants went negative (a concurrent spend got there
+ * first). Chunked because D1 binds at most 100 parameters per statement.
+ */
+function grantsStayNonNegative(ids: string[]) {
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += 90) chunks.push(ids.slice(i, i + 90));
+  return chunks.map((chunk) =>
+    guard({
+      table: credit,
+      column: 'userId',
+      where: inArray(credit.id, chunk),
+      require: gte(credit.remainingCredits, 0),
+      message: 'Insufficient credits',
+    })
+  );
+}
+
+/**
+ * Plan a FIFO consumption without writing anything: returns the steps for
+ * `atomic()` (so callers can bundle them with their own writes, as ai-tasks
+ * does) plus the consumption record, or null when the balance is too low.
+ * Decrements are relative and followed by a non-negative guard, so a
+ * concurrent spend makes the whole atomic write fail instead of overdrawing.
+ */
+export async function planConsume(params: {
   userId: string;
   userEmail?: string;
   credits: number;
   scene?: string;
   description?: string;
   metadata?: string;
-  tx?: any;
-}): Promise<{ success: boolean; consumedCredit?: any }> {
+}): Promise<{
+  consumedCredit: NewCredit;
+  steps: (q: any) => AtomicStep[];
+} | null> {
   const {
     userId,
     userEmail,
@@ -120,100 +166,172 @@ export async function consume(params: {
     scene,
     description,
     metadata,
-    tx,
   } = params;
-  const now = new Date();
+  if (!Number.isInteger(amount) || amount <= 0) {
+    throw new Error('Credits to consume must be a positive integer');
+  }
 
-  const execute = async (tx: any) => {
-    // 1. Check balance
-    const [balance] = await tx
-      .select({ total: sum(credit.remainingCredits) })
-      .from(credit)
-      .where(
-        and(
-          eq(credit.userId, userId),
-          eq(credit.transactionType, CreditTransactionType.GRANT),
-          eq(credit.status, CreditStatus.ACTIVE),
-          gt(credit.remainingCredits, 0),
-          or(isNull(credit.expiresAt), gt(credit.expiresAt, now))
-        )
-      );
+  const grants: (typeof credit.$inferSelect)[] = await db()
+    .select()
+    .from(credit)
+    .where(validCreditConditions(userId))
+    .orderBy(asc(credit.expiresAt))
+    .limit(10_000);
 
-    if (!balance?.total || parseInt(balance.total) < amount) {
-      return { success: false };
-    }
+  let remainingToConsume = amount;
+  const consumedItems: {
+    creditId: string;
+    transactionNo: string;
+    creditsConsumed: number;
+    creditsBefore: number;
+    creditsAfter: number;
+  }[] = [];
+  for (const item of grants) {
+    if (remainingToConsume <= 0) break;
+    const toConsume = Math.min(remainingToConsume, item.remainingCredits);
+    consumedItems.push({
+      creditId: item.id,
+      transactionNo: item.transactionNo,
+      creditsConsumed: toConsume,
+      creditsBefore: item.remainingCredits,
+      creditsAfter: item.remainingCredits - toConsume,
+    });
+    remainingToConsume -= toConsume;
+  }
+  if (remainingToConsume > 0) return null;
 
-    // 2. FIFO consumption with batching
-    let remainingToConsume = amount;
-    const batchSize = 1000;
-    const maxBatches = 10;
-    let batchNo = 0;
-    const consumedItems: any[] = [];
-
-    while (remainingToConsume > 0 && batchNo < maxBatches) {
-      const batchCredits = await tx
-        .select()
-        .from(credit)
-        .where(
-          and(
-            eq(credit.userId, userId),
-            eq(credit.transactionType, CreditTransactionType.GRANT),
-            eq(credit.status, CreditStatus.ACTIVE),
-            gt(credit.remainingCredits, 0),
-            or(isNull(credit.expiresAt), gt(credit.expiresAt, now))
-          )
-        )
-        .orderBy(asc(credit.expiresAt))
-        .limit(batchSize)
-        .for('update');
-
-      if (!batchCredits || batchCredits.length === 0) break;
-
-      for (const item of batchCredits) {
-        if (remainingToConsume <= 0) break;
-        const toConsume = Math.min(remainingToConsume, item.remainingCredits);
-
-        await tx
-          .update(credit)
-          .set({ remainingCredits: item.remainingCredits - toConsume })
-          .where(eq(credit.id, item.id));
-
-        consumedItems.push({
-          creditId: item.id,
-          transactionNo: item.transactionNo,
-          creditsConsumed: toConsume,
-          creditsBefore: item.remainingCredits,
-          creditsAfter: item.remainingCredits - toConsume,
-        });
-
-        remainingToConsume -= toConsume;
-      }
-
-      batchNo++;
-    }
-
-    // 3. Create consumption record
-    const consumedCredit: NewCredit = {
-      id: getUuid(),
-      userId,
-      userEmail: userEmail || '',
-      transactionNo: getSnowId(),
-      transactionType: CreditTransactionType.CONSUME,
-      transactionScene: scene || '',
-      status: CreditStatus.ACTIVE,
-      description: description || '',
-      credits: -amount,
-      remainingCredits: 0,
-      consumedDetail: JSON.stringify(consumedItems),
-      metadata: metadata || '',
-    };
-    await tx.insert(credit).values(consumedCredit);
-
-    return { success: true, consumedCredit };
+  const consumedCredit: NewCredit = {
+    id: getUuid(),
+    userId,
+    userEmail: userEmail || '',
+    transactionNo: getSnowId(),
+    transactionType: CreditTransactionType.CONSUME,
+    transactionScene: scene || '',
+    status: CreditStatus.ACTIVE,
+    description: description || '',
+    credits: -amount,
+    remainingCredits: 0,
+    consumedDetail: JSON.stringify(consumedItems),
+    metadata: metadata || '',
   };
 
-  if (tx) return execute(tx);
-  return db().transaction(execute);
+  return {
+    consumedCredit,
+    steps: (q) => [
+      ...consumedItems.map((item) =>
+        q
+          .update(credit)
+          .set({
+            remainingCredits: sql`${credit.remainingCredits} - ${item.creditsConsumed}`,
+          })
+          .where(eq(credit.id, item.creditId))
+      ),
+      ...grantsStayNonNegative(consumedItems.map((i) => i.creditId)),
+      q.insert(credit).values(consumedCredit),
+    ],
+  };
+}
+
+/** Retries when a concurrent spend wins the race, then gives up as insufficient. */
+export async function consume(params: {
+  userId: string;
+  userEmail?: string;
+  credits: number;
+  scene?: string;
+  description?: string;
+  metadata?: string;
+}): Promise<{ success: boolean; consumedCredit?: NewCredit }> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const plan = await planConsume(params);
+    if (!plan) return { success: false };
+    try {
+      await atomic(plan.steps);
+      return { success: true, consumedCredit: plan.consumedCredit };
+    } catch (error) {
+      if (!(error instanceof AtomicGuardError)) throw error;
+    }
+  }
+  return { success: false };
+}
+
+// --- Deduct for a refunded order ---
+
+/**
+ * Plan clawing back up to `credits` for a refunded order. Takes the order's
+ * own unspent grant first, then other valid grants (FIFO). Never drives the
+ * balance below zero — `deducted` is how many credits will actually come off.
+ */
+export async function planDeductForRefund(params: {
+  userId: string;
+  userEmail?: string;
+  orderNo: string;
+  credits: number;
+  description?: string;
+}): Promise<{ deducted: number; steps: (q: any) => AtomicStep[] }> {
+  const { userId, userEmail, orderNo, credits: amount, description } = params;
+  if (!amount || amount <= 0) return { deducted: 0, steps: () => [] };
+
+  const grants: (typeof credit.$inferSelect)[] = await db()
+    .select()
+    .from(credit)
+    .where(validCreditConditions(userId))
+    .orderBy(
+      sql`case when ${credit.orderNo} = ${orderNo} then 0 else 1 end`,
+      asc(credit.expiresAt)
+    );
+
+  let remainingToDeduct = amount;
+  const consumedItems: {
+    creditId: string;
+    transactionNo: string;
+    creditsConsumed: number;
+    creditsBefore: number;
+    creditsAfter: number;
+  }[] = [];
+  for (const item of grants) {
+    if (remainingToDeduct <= 0) break;
+    const toDeduct = Math.min(remainingToDeduct, item.remainingCredits);
+    consumedItems.push({
+      creditId: item.id,
+      transactionNo: item.transactionNo,
+      creditsConsumed: toDeduct,
+      creditsBefore: item.remainingCredits,
+      creditsAfter: item.remainingCredits - toDeduct,
+    });
+    remainingToDeduct -= toDeduct;
+  }
+
+  const deducted = amount - remainingToDeduct;
+  if (deducted === 0) return { deducted: 0, steps: () => [] };
+
+  return {
+    deducted,
+    steps: (q) => [
+      ...consumedItems.map((item) =>
+        q
+          .update(credit)
+          .set({
+            remainingCredits: sql`${credit.remainingCredits} - ${item.creditsConsumed}`,
+          })
+          .where(eq(credit.id, item.creditId))
+      ),
+      ...grantsStayNonNegative(consumedItems.map((i) => i.creditId)),
+      q.insert(credit).values({
+        id: getUuid(),
+        userId,
+        userEmail: userEmail || '',
+        orderNo,
+        transactionNo: getSnowId(),
+        transactionType: CreditTransactionType.CONSUME,
+        transactionScene: CreditTransactionScene.REFUND,
+        status: CreditStatus.ACTIVE,
+        description: description || 'Refund deduct',
+        credits: -deducted,
+        remainingCredits: 0,
+        consumedDetail: JSON.stringify(consumedItems),
+      } satisfies NewCredit),
+    ],
+  };
 }
 
 // --- Revoke (restore credits from a consumed record) ---
@@ -233,25 +351,39 @@ export async function revoke(consumeCreditId: string) {
 
   if (!consumeRecord || !consumeRecord.consumedDetail) return;
 
-  const items = JSON.parse(consumeRecord.consumedDetail);
+  const items: { creditId: string; creditsConsumed: number }[] = JSON.parse(
+    consumeRecord.consumedDetail
+  );
 
-  await db().transaction(async (tx: any) => {
-    // Atomic increment per source grant — no read-modify-write race.
-    for (const item of items) {
-      await tx
+  try {
+    await atomic((q) => [
+      // Claim the consumption record first: a retried or concurrent revoke
+      // (e.g. a provider's failure callback delivered twice) must restore once.
+      guard({
+        table: credit,
+        column: 'userId',
+        where: eq(credit.id, consumeCreditId),
+        require: eq(credit.status, CreditStatus.ACTIVE),
+        message: 'Already revoked',
+      }),
+      q
         .update(credit)
-        .set({
-          remainingCredits: sql`${credit.remainingCredits} + ${item.creditsConsumed}`,
-        })
-        .where(eq(credit.id, item.creditId));
-    }
-
-    // Mark consumption record as deleted
-    await tx
-      .update(credit)
-      .set({ status: CreditStatus.DELETED })
-      .where(eq(credit.id, consumeCreditId));
-  });
+        .set({ status: CreditStatus.DELETED })
+        .where(eq(credit.id, consumeCreditId)),
+      // Atomic increment per source grant — no read-modify-write race.
+      ...items.map((item) =>
+        q
+          .update(credit)
+          .set({
+            remainingCredits: sql`${credit.remainingCredits} + ${item.creditsConsumed}`,
+          })
+          .where(eq(credit.id, item.creditId))
+      ),
+    ]);
+  } catch (error) {
+    if (error instanceof AtomicGuardError) return; // already revoked
+    throw error;
+  }
 }
 
 // --- Auto-grant for new user ---

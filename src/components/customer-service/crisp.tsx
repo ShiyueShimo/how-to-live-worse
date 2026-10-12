@@ -1,8 +1,12 @@
+import { safeEmbedSetting } from '@/lib/embed-ids';
+
 /**
  * Crisp live chat widget.
  * @see https://docs.crisp.chat/
  */
-export function Crisp({ websiteId }: { websiteId: string }) {
+export function Crisp({ websiteId: raw }: { websiteId: string }) {
+  // Interpolated into an inline script — only a well-formed ID gets through.
+  const websiteId = safeEmbedSetting('crisp_website_id', raw);
   if (!websiteId) return null;
   return (
     <script

@@ -65,7 +65,14 @@ export default defineConfig({
   },
   plugins: [
     // MDX must run before the react plugin so JSX in compiled MDX gets transformed.
-    { enforce: 'pre', ...mdx({ providerImportSource: '@mdx-js/react' }) },
+    // .claude/ holds agent skills served verbatim (`?raw`) — never compile them.
+    {
+      enforce: 'pre',
+      ...mdx({
+        providerImportSource: '@mdx-js/react',
+        exclude: /\/\.claude\//,
+      }),
+    },
     tailwindcss(),
     paraglideVitePlugin({
       project: './project.inlang',

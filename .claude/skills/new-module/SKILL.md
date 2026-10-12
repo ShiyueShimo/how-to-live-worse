@@ -108,7 +108,10 @@ export async function remove(params: { userId: string; id: string }) {
 3. **Export pure functions** — no React, no route handlers, no middleware
 4. **Use `getUuid()`** for IDs, `getSnowId()`/`getUniSeq()` for order-like sequential IDs
 5. **Soft delete** via `deletedAt` field — don't hard-delete user data
-6. **Transactions** for multi-table operations: `await db().transaction(async (tx) => { ... })`
+6. **Atomic writes** for multi-statement or multi-table operations: `atomic((q) => [guard(...), q.update(...), q.insert(...)])` from `@/core/db/atomic`. Never use `db().transaction()`, because on D1 it runs statements one by one with no rollback. Read first, build all writes up front, and express conditions as `guard`s (see AGENTS.md → "Atomic writes").
+7. **Money, credits, permissions, secrets**: follow AGENTS.md → "Security & Integrity Rules for New Features"
+8. **D1 limit**: at most 100 bound parameters per statement. Chunk big `inArray` lists and bulk inserts.
+9. **Admin timeline visibility**: decide what an admin investigating a user should see from this feature (see "Product events" below). Don't import `@/modules/events/service` from your service, because modules don't import each other. Record events in the API route.
 
 ## Step 4: Create API Server Route
 
@@ -171,6 +174,7 @@ Tell the user:
 - Module location: `src/modules/<name>/service.ts`
 - API server route: `src/routes/api/<name>.ts` → `/api/<name>` (methods available)
 - Schema: which table(s) used or if new table needed
+- Timeline: which events now show in the admin user timeline (or why none)
 - Next steps: "Run `/new-page <description>` to add a dashboard view with i18n"
 
 ## Integration Patterns
@@ -181,3 +185,36 @@ If the module needs to interact with existing modules:
 **Need payment?** Don't — let the payment module call your module. Add a hook in `payment/service.ts` handleCheckoutSuccess.
 **Need auth check?** Done at the API route level, not in the service.
 **Need permission check?** Call `hasPermission` from `@/modules/rbac/service` in the API route.
+
+### Product events (admin user timeline)
+
+The admin user detail page shows a timeline per user. Orders,
+subscriptions, credits, AI tasks and tickets appear automatically. Make your
+feature's important moments show up too:
+
+- **The feature has its own table** (e.g. a gift log): don't record anything
+  twice. Add a source to `src/server/admin/timeline-sources.ts`. Its comment
+  has the full example, and `from` / `by` / `limit` must be applied as shown.
+- **Nothing stores the moment** (user hit a limit, was blocked, picked an
+  option):
+  1. Register the kind in `src/config/events.ts` with a `tone`. Add
+     `client: true` **only** if the browser may report it. Never add it for
+     risk, money or permission events, because anyone can call the endpoint.
+  2. Server side, record it in the API route after the decision:
+     ```ts
+     import { recordEvent } from '@/modules/events/service';
+     await recordEvent({ userId: session.user.id, kind: 'risk_flagged', detail: { reason } });
+     ```
+     It never throws, so it can't break the request.
+  3. Browser side (client kinds only), in a component:
+     ```ts
+     import { track } from '@/lib/track';
+     track('paywall_hit', { feature: 'hd_export' });
+     ```
+  4. `detail` is flat: up to 10 keys, strings ≤ 200 chars, numbers or
+     booleans. No secrets, emails or other personal data.
+- **Label** every new kind: `admin.user_detail.timeline_<kind>` in both
+  `messages/en.json` and `messages/zh.json`.
+- Agents read the same data with the `users_timeline` admin operation.
+- Adding the first event to an existing project needs the `user_event` table
+  (UPGRADING.md, 2026-10-12).

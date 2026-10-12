@@ -140,3 +140,9 @@ Run `pnpm build` to verify the page compiles.
 - **Use semantic Tailwind classes** — `bg-card`, `text-muted-foreground`, `border-border`, not raw colors.
 - **Import icons from `lucide-react`** — `import { SomeIcon } from "lucide-react"`.
 - **Keep pages focused** — one page does one thing.
+- **Report meaningful user intent** — when the page has a paywall, upgrade
+  prompt or key decision, call `track('<kind>', { … })` from `@/lib/track` for
+  a kind registered with `client: true` in `src/config/events.ts`, and add its
+  `admin.user_detail.timeline_<kind>` label. It then shows in the admin user
+  timeline. Never report money, risk or permission events from the browser.
+  Record those on the server (see the new-module skill → "Product events").

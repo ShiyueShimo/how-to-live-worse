@@ -80,11 +80,13 @@ export function AppLayout({
       if (redirectingRef.current) return;
       redirectingRef.current = true;
       // Remember where the user was headed so sign-in can send them back.
+      // replace (not push): a guarded page must not stay in history, or Back
+      // would land on it and immediately bounce to sign-in again.
       // pathname is already locale-free; append the live query string.
       const search =
         typeof window !== 'undefined' ? window.location.search : '';
       const callbackUrl = `${pathname}${search}`;
-      router.push(`/sign-in?callbackUrl=${encodeURIComponent(callbackUrl)}`);
+      router.replace(`/sign-in?callbackUrl=${encodeURIComponent(callbackUrl)}`);
       return;
     }
 
@@ -94,7 +96,7 @@ export function AppLayout({
     if (needsInvite) {
       if (!redirectingRef.current) {
         redirectingRef.current = true;
-        router.push('/redeem-invite');
+        router.replace('/redeem-invite');
       }
       return;
     }
@@ -105,7 +107,7 @@ export function AppLayout({
     if (permissionsQuery.isPending) return;
 
     if (permissionsQuery.isError || !isAdmin) {
-      router.push(unauthorizedRedirect);
+      router.replace(unauthorizedRedirect);
     }
   }, [
     isPending,
@@ -161,7 +163,7 @@ export function AppLayout({
             <div className="flex items-center gap-1 px-4">{headerExtra}</div>
           )}
         </header>
-        <main className="flex-1 overflow-auto">{children}</main>
+        <main className="min-w-0 flex-1 overflow-x-clip">{children}</main>
       </SidebarInset>
     </SidebarProvider>
   );

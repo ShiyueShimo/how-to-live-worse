@@ -24,6 +24,12 @@ export type PricingProduct = {
   type: PaymentType;
   priceInCents: number;
   currency: string;
+  /**
+   * Price in fen for CNY-only providers (Alipay, WeChat Pay) when `currency`
+   * isn't CNY. Without it those providers refuse the product — the amount is
+   * never reused across currencies.
+   */
+  cnyPriceInCents?: number;
   credits: number;
   creditsValidDays?: number;
   plan?: PricingPlanInfo;

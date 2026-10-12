@@ -253,6 +253,33 @@ export interface PaymentBilling {
 }
 
 /**
+ * Refund request — identifiers stored on the local order. Providers pick
+ * whichever one their refund API is keyed on.
+ */
+export interface PaymentRefundRequest {
+  orderNo: string; // our order no — also the refund idempotency key
+  sessionId?: string; // checkout session id (order.paymentSessionId)
+  transactionId?: string; // provider transaction id (order.transactionId)
+  invoiceId?: string; // provider invoice / capture id (order.invoiceId)
+  paymentType?: string; // one-time | subscription | renew
+  amount: number; // order total in minor units — refunded in full
+  currency: string;
+  reason?: string;
+}
+
+export enum RefundStatus {
+  PENDING = 'pending', // accepted, provider settles asynchronously
+  SUCCEEDED = 'succeeded',
+}
+
+export interface PaymentRefund {
+  refundId?: string;
+  status: RefundStatus;
+  amount?: number; // minor units, when the provider reports it
+  refundResult: any; // raw provider response
+}
+
+/**
  * Payment configs interface
  */
 export interface PaymentConfigs {
@@ -304,4 +331,7 @@ export interface PaymentProvider {
   }: {
     subscriptionId: string;
   }): Promise<PaymentSession>;
+
+  // refund a paid order in full
+  refundPayment?(request: PaymentRefundRequest): Promise<PaymentRefund>;
 }

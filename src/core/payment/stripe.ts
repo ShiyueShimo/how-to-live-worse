@@ -8,6 +8,7 @@ import {
   PaymentInvoice,
   PaymentStatus,
   PaymentType,
+  RefundStatus,
   SubscriptionCycleType,
   SubscriptionInfo,
   SubscriptionStatus,
@@ -16,6 +17,8 @@ import {
   type PaymentEvent,
   type PaymentOrder,
   type PaymentProvider,
+  type PaymentRefund,
+  type PaymentRefundRequest,
   type PaymentSession,
 } from './types';
 
@@ -361,6 +364,92 @@ export class StripeProvider implements PaymentProvider {
     } catch (error) {
       throw error;
     }
+  }
+
+  async refundPayment(request: PaymentRefundRequest): Promise<PaymentRefund> {
+    // Checkout orders store the cs_ session id; renewals store the in_ invoice id.
+    const target = await this.resolveRefundTarget(
+      request.sessionId || request.transactionId || request.invoiceId || ''
+    );
+    if (!target) {
+      throw new Error('No refundable Stripe payment found for this order');
+    }
+
+    // Omit `amount` → Stripe refunds whatever is still refundable.
+    const refund = await this.client.refunds.create(
+      {
+        ...target,
+        reason: 'requested_by_customer',
+        metadata: {
+          order_no: request.orderNo,
+          ...(request.reason ? { note: request.reason.slice(0, 500) } : {}),
+        },
+      },
+      { idempotencyKey: `refund_${request.orderNo}` }
+    );
+
+    if (refund.status === 'failed' || refund.status === 'canceled') {
+      throw new Error(
+        `Stripe refund ${refund.status}: ${refund.failure_reason || ''}`.trim()
+      );
+    }
+
+    return {
+      refundId: refund.id,
+      status:
+        refund.status === 'succeeded'
+          ? RefundStatus.SUCCEEDED
+          : RefundStatus.PENDING,
+      amount: refund.amount,
+      refundResult: refund,
+    };
+  }
+
+  private async resolveRefundTarget(
+    id: string
+  ): Promise<{ payment_intent: string } | { charge: string } | null> {
+    if (id.startsWith('pi_')) return { payment_intent: id };
+    if (id.startsWith('ch_')) return { charge: id };
+
+    if (id.startsWith('cs_')) {
+      const session = await this.client.checkout.sessions.retrieve(id);
+      if (session.payment_intent) {
+        return { payment_intent: session.payment_intent as string };
+      }
+      // Subscription checkouts are paid through their first invoice.
+      if (session.invoice) {
+        return this.resolveRefundTarget(session.invoice as string);
+      }
+      return null;
+    }
+
+    if (id.startsWith('in_')) {
+      const payments = await this.client.invoicePayments.list({
+        invoice: id,
+        status: 'paid',
+        limit: 1,
+      });
+      const payment = payments.data[0]?.payment;
+      if (payment?.payment_intent) {
+        return {
+          payment_intent:
+            typeof payment.payment_intent === 'string'
+              ? payment.payment_intent
+              : payment.payment_intent.id,
+        };
+      }
+      if (payment?.charge) {
+        return {
+          charge:
+            typeof payment.charge === 'string'
+              ? payment.charge
+              : payment.charge.id,
+        };
+      }
+      return null;
+    }
+
+    return null;
   }
 
   private mapStripeEventType(eventType: string): PaymentEventType {

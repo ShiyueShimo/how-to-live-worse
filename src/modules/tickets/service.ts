@@ -6,7 +6,6 @@ import {
   eq,
   inArray,
   like,
-  or,
   type SQL,
 } from 'drizzle-orm';
 
@@ -19,6 +18,7 @@ import {
   type TicketMessage,
 } from '@/config/db/schema';
 import { getUuid } from '@/lib/hash';
+import { keywordMatch } from '@/lib/sql-search';
 
 export type TicketStatus = 'open' | 'replied' | 'closed';
 export type TicketRole = 'user' | 'admin';
@@ -193,15 +193,11 @@ export async function listAllTickets(params: {
 
   const conditions: SQL[] = [];
   if (params.status) conditions.push(eq(ticket.status, params.status));
-  if (params.search) {
-    conditions.push(
-      or(
-        like(ticket.title, `%${params.search}%`),
-        like(user.email, `%${params.search}%`),
-        like(user.name, `%${params.search}%`)
-      )!
-    );
-  }
+  const keyword = keywordMatch(params.search, {
+    contains: [ticket.title, user.email, user.name],
+    exact: [ticket.id, ticket.userId],
+  });
+  if (keyword) conditions.push(keyword);
   const where = conditions.length > 0 ? and(...conditions) : undefined;
 
   const base = db()
@@ -250,6 +246,26 @@ export async function getTicketById(id: string): Promise<Ticket | undefined> {
     .where(eq(ticket.id, id))
     .limit(1);
   return row;
+}
+
+/**
+ * Get a ticket by ID with its author's name/email/avatar (admin views).
+ */
+export async function getTicketWithUser(id: string) {
+  const [row] = await db()
+    .select({
+      ticket,
+      userName: user.name,
+      userEmail: user.email,
+      userAvatar: user.image,
+    })
+    .from(ticket)
+    .leftJoin(user, eq(ticket.userId, user.id))
+    .where(eq(ticket.id, id))
+    .limit(1);
+  if (!row) return undefined;
+  const { ticket: t, ...author } = row;
+  return { ...t, ...author };
 }
 
 /**

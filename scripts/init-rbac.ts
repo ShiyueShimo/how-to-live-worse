@@ -14,6 +14,7 @@ import { and, eq } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 
 import * as schema from '../src/config/db/schema';
+import { adminScopes } from '../src/lib/admin-operations';
 
 // ─── Create DB connection based on provider ─────────────────────────────────
 async function createScriptDb() {
@@ -123,6 +124,16 @@ const defaultPermissions = [
     description: 'Delete categories',
   },
 
+  // Passwords: dedicated code outside admin.users.* so that wildcard never
+  // grants account takeover. Only super_admin (*) holds it by default.
+  {
+    code: 'admin.passwords.reset',
+    resource: 'passwords',
+    action: 'reset',
+    title: 'Reset Passwords',
+    description: "Set another user's sign-in password",
+  },
+
   // Payments management
   {
     code: 'admin.payments.read',
@@ -130,6 +141,14 @@ const defaultPermissions = [
     action: 'read',
     title: 'Read Payments',
     description: 'View payment list and details',
+  },
+  {
+    code: 'admin.payments.refund',
+    resource: 'payments',
+    action: 'refund',
+    title: 'Refund Payments',
+    description:
+      'Refund orders through the payment provider and deduct credits',
   },
 
   // Subscriptions management
@@ -275,6 +294,20 @@ const defaultPermissions = [
   },
 ];
 
+// Keep every exported management capability selectable in the RBAC editor.
+for (const code of adminScopes) {
+  if (defaultPermissions.some((permission) => permission.code === code))
+    continue;
+  const [, resource, action] = code.split('.');
+  defaultPermissions.push({
+    code,
+    resource,
+    action,
+    title: `${resource}: ${action}`,
+    description: `Admin API permission: ${code}`,
+  });
+}
+
 const defaultRoles = [
   {
     name: 'super_admin',
@@ -295,7 +328,11 @@ const defaultRoles = [
       'admin.users.*',
       'admin.posts.*',
       'admin.categories.*',
-      'admin.payments.*',
+      // Explicit, not admin.payments.*: wildcards expand to every payments
+      // code at seed time, which would silently hand out refunds (real money).
+      // Refunds stay with super_admin or a dedicated role.
+      'admin.payments.read',
+      'admin.payments.write',
       'admin.subscriptions.*',
       'admin.credits.*',
       'admin.apikeys.*',

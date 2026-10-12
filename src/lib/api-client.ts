@@ -72,3 +72,19 @@ export function pageQuery(base: string, p: PageParams) {
   if (p.search) params.set('search', p.search);
   return `${base}?${params}`;
 }
+
+/**
+ * Fetch every row of a paginated list (pickers, checklists). Admin list
+ * endpoints cap pageSize at 100, so walk the pages instead of asking for more.
+ */
+export async function apiGetAll<T>(base: string): Promise<T[]> {
+  const pageSize = 100;
+  const items: T[] = [];
+  for (let page = 1; ; page++) {
+    const res = await apiGet<PageResult<T>>(
+      pageQuery(base, { page, pageSize })
+    );
+    items.push(...res.items);
+    if (res.items.length < pageSize || items.length >= res.total) return items;
+  }
+}
