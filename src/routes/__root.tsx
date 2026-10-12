@@ -14,15 +14,15 @@ import { ThemeProvider } from 'next-themes';
 
 import { envConfigs } from '@/config';
 import { parseCookieConsent } from '@/lib/cookie-consent';
+import { socialImageUrl } from '@/lib/public-discovery';
 import { getQueryClient } from '@/lib/query-client';
-import { getLocale, locales, localizeUrl } from '@/paraglide/runtime.js';
+import { getLocale } from '@/paraglide/runtime.js';
 import { useCookieConsent } from '@/hooks/use-cookie-consent';
 import { CookieConsent } from '@/blocks/cookie-consent';
 import { Ads } from '@/components/analytics/ads';
 import { GoogleAnalytics } from '@/components/analytics/google-analytics';
 import { Plausible } from '@/components/analytics/plausible';
 import { CustomerService } from '@/components/customer-service';
-import { GoogleOneTap } from '@/components/google-one-tap';
 import { SandboxPreviewBridge } from '@/components/sandbox-preview-bridge';
 import { Toaster } from '@/components/ui/sonner';
 
@@ -89,15 +89,17 @@ export const Route = createRootRoute({
         { name: 'viewport', content: 'width=device-width, initial-scale=1' },
         { title: envConfigs.app_name },
         { name: 'description', content: envConfigs.app_description },
+        { property: 'og:title', content: envConfigs.app_name },
+        {
+          property: 'og:description',
+          content: envConfigs.app_description,
+        },
+        { property: 'og:image', content: socialImageUrl(appUrl) },
+        { name: 'twitter:card', content: 'summary_large_image' },
       ],
       links: [
         { rel: 'icon', href: '/favicon.svg', type: 'image/svg+xml' },
         { rel: 'apple-touch-icon', href: '/favicon.svg' },
-        ...locales.map((loc) => ({
-          rel: 'alternate',
-          hrefLang: loc,
-          href: localizeUrl(`${appUrl}/`, { locale: loc }).href,
-        })),
       ],
     };
   },
@@ -125,7 +127,6 @@ function RootComponent() {
         <Outlet />
         <SandboxPreviewBridge />
         <Toaster position="top-center" richColors />
-        <GoogleOneTap />
         {analytics?.gaId ? (
           <GoogleAnalytics
             measurementId={analytics.gaId}

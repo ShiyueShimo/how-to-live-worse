@@ -1,5 +1,9 @@
 import { createFileRoute, Link } from '@tanstack/react-router';
 
+import {
+  PROJECT_GITHUB_ISSUES_URL,
+  PROJECT_GITHUB_URL,
+} from '@/lib/public-discovery';
 import { GuideInfoPage, InfoSection } from '@/components/guide-info-page';
 
 function ContactPage() {
@@ -7,22 +11,25 @@ function ContactPage() {
     <GuideInfoPage
       eyebrow="CONTACT & CORRECTIONS"
       title="Point out a broken link or a bad joke."
-      intro="This local-first prototype has no inbox or message form configured, so it will not invite you to submit private details into an unmonitored form."
+      intro="Corrections, license questions, and complaints about a satirical line belong in a public issue. This site does not collect private messages through a form."
     >
+      <InfoSection title="For this project">
+        <p>
+          Open an issue on{' '}
+          <a href={PROJECT_GITHUB_ISSUES_URL}>
+            github.com/ShiyueShimo/how-to-live-worse
+          </a>
+          . The repository is {PROJECT_GITHUB_URL.replace('https://', '')}. Do
+          not send health, legal, or other sensitive personal details through
+          GitHub.
+        </p>
+      </InfoSection>
       <InfoSection title="For source corrections">
         <p>
           Every entry links to its upstream chapter and cited material. Start
           with the <Link to="/sources">source record</Link> and the original
           repository. This site is independent, so a correction here may need to
           be applied separately.
-        </p>
-      </InfoSection>
-      <InfoSection title="For this project">
-        <p>
-          A public project email or issue tracker can be added when the owner
-          chooses one. Until then, no contact address is fabricated and no
-          personal or medical information should be sent through the
-          browser-only tools.
         </p>
       </InfoSection>
     </GuideInfoPage>
@@ -36,7 +43,7 @@ export const Route = createFileRoute('/contact')({
       {
         name: 'description',
         content:
-          'How to check source links and why this prototype does not collect contact messages.',
+          'How to report a source error or a problem with this independent satire.',
       },
     ],
   }),

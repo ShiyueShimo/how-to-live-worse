@@ -1,5 +1,6 @@
 import { createFileRoute, Link } from '@tanstack/react-router';
 
+import { PROJECT_GITHUB_URL } from '@/lib/public-discovery';
 import { GuideInfoPage, InfoSection } from '@/components/guide-info-page';
 
 function AboutPage() {
@@ -32,11 +33,17 @@ function AboutPage() {
           not a diagnosis or personal recommendation.
         </p>
       </InfoSection>
-      <InfoSection title="Independent and unofficial.">
+      <InfoSection title="Independent, unofficial, English-first.">
         <p>
           This project is not affiliated with the upstream guide’s author or
           with the separate reference website. It uses the upstream guide under
-          its stated content license and links back to the original sources.
+          its stated content license and links back to the original sources. The
+          public site is maintained in English; source Chinese text remains on
+          each entry. Code and issues live at{' '}
+          <a href={PROJECT_GITHUB_URL}>
+            {PROJECT_GITHUB_URL.replace('https://', '')}
+          </a>
+          .
         </p>
       </InfoSection>
     </GuideInfoPage>

@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import { Link } from '@tanstack/react-router';
 
 import { envConfigs } from '@/config';
+import { SOURCE_GUIDE_URL, SOURCE_LICENSE_URL } from '@/lib/public-discovery';
 import { m } from '@/paraglide/messages.js';
 import { localizeHref } from '@/paraglide/runtime.js';
 
@@ -43,6 +44,12 @@ export function GuideShell({ children, active }: GuideShellProps) {
         </Link>
         <div className="footer-copy">
           <p>{m['worse.disclaimer']()}</p>
+          <p className="footer-attribution">
+            Adapted from{' '}
+            <a href={SOURCE_GUIDE_URL}>HowToLiveBetter by eternity4719</a> under{' '}
+            <a href={SOURCE_LICENSE_URL}>CC BY 4.0</a>. See{' '}
+            <a href={localizeHref('/sources')}>sources</a>.
+          </p>
           <nav aria-label="Site pages">
             {[
               ['Glossary', '/glossary'],

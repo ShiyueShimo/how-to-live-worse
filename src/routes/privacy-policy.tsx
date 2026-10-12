@@ -5,7 +5,7 @@ import { GuideInfoPage, InfoSection } from '@/components/guide-info-page';
 function PrivacyPage() {
   return (
     <GuideInfoPage
-      eyebrow="PRIVACY · LAST REVIEWED 9 OCTOBER 2026"
+      eyebrow="PRIVACY · LAST REVIEWED 12 OCTOBER 2026"
       title="Your notes stay in your browser."
       intro="The public guide does not ask for an account. Features that save a checklist, favorites, notes, daily marks or a bingo board use this browser’s local storage."
     >
@@ -23,22 +23,21 @@ function PrivacyPage() {
           to; private notes and quiz answers are excluded.
         </p>
       </InfoSection>
-      <InfoSection title="Language preference and hosting">
+      <InfoSection title="Hosting">
         <p>
-          The template’s language runtime may store a locale preference in a
-          cookie. Your web host and network provider may receive ordinary
-          connection data needed to deliver a page, such as an IP address,
-          requested URL and user-agent. Their retention and processing depend on
-          the deployment provider’s configuration.
+          The public site is hosted on Vercel. Vercel and the network path to it
+          receive ordinary connection data needed to deliver a page, such as an
+          IP address, requested URL, user-agent, and basic logs. Retention
+          follows that host’s configuration.
         </p>
       </InfoSection>
-      <InfoSection title="No form, account or analytics promise">
+      <InfoSection title="Cookies and analytics">
         <p>
-          This public prototype has no contact form or account workflow on its
-          guide pages. No analytics component is mounted by the public page
-          shell in this copy. If a future deployment adds hosting analytics,
-          contact forms or third-party embeds, this notice must be updated to
-          name them.
+          The public guide does not set an analytics, advertising, or account
+          cookie. If a future deployment turns on hosting analytics, a cookie
+          banner, or third-party embeds through admin settings, this notice will
+          name them. Until then, no such scripts are mounted from stored
+          settings.
         </p>
       </InfoSection>
       <InfoSection title="Sensitive information">
@@ -46,7 +45,8 @@ function PrivacyPage() {
           Do not put health, legal, financial or other sensitive information in
           a private note if someone else can use this browser profile. Notes are
           not encrypted and anyone with local access to the browser profile may
-          be able to read them.
+          be able to read them. Do not send that material through GitHub issues
+          either.
         </p>
       </InfoSection>
     </GuideInfoPage>
@@ -60,7 +60,7 @@ export const Route = createFileRoute('/privacy-policy')({
       {
         name: 'description',
         content:
-          'How local guide notes, preferences and ordinary hosting data are handled.',
+          'How local guide notes and ordinary Vercel hosting data are handled.',
       },
     ],
   }),

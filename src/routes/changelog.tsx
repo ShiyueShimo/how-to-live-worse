@@ -30,6 +30,13 @@ function ChangelogPage() {
           visible page inventory and writes its own text.
         </p>
       </InfoSection>
+      <InfoSection title="12 October 2026 · Public-site cleanup">
+        <p>
+          The public English site now attributes the CC BY source in the footer,
+          points corrections to the GitHub issue tracker, and keeps template
+          admin, pricing, and blog paths out of the sitemap.
+        </p>
+      </InfoSection>
       <InfoSection title="9 October 2026 · Play and local tools">
         <p>
           Added five-question reading routes, balanced quiz rounds, daily

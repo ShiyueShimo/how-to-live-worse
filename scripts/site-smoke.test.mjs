@@ -101,6 +101,11 @@ test(
         'Home request failed:\n' + html + '\n' + serverOutput
       );
       assert.match(html, /HowToLiveWorse/i);
+      assert.match(html, /CC BY 4.0/);
+      assert.match(html, /eternity4719/);
+      assert.match(html, /og:image/);
+      assert.match(html, /reading-nook-v2\.png/);
+      assert.doesNotMatch(html, /hrefLang":"zh"|hreflang="zh"|\/zh"/i);
       assert.doesNotMatch(
         html,
         /生财有术|ShipAny|pagead2\.googlesyndication\.com|googletagmanager|plausible\.io|client\.crisp\.chat|tawk\.to/i
@@ -139,10 +144,13 @@ test(
         { path: '/book/download', expected: /Take the whole guide with you/i },
         { path: '/about', expected: /A mirror with the facts left in/i },
         { path: '/sources', expected: /Every detour points back/i },
-        { path: '/contact', expected: /Point out a broken link/i },
+        {
+          path: '/contact',
+          expected: /github.com\/ShiyueShimo\/how-to-live-worse/i,
+        },
         {
           path: '/privacy-policy',
-          expected: /Your notes stay in your browser/i,
+          expected: /hosted on Vercel/i,
         },
         {
           path: '/terms-of-service',
@@ -274,8 +282,11 @@ test(
       );
 
       const robotsResponse = await fetch(`http://127.0.0.1:${port}/robots.txt`);
+      const robotsText = await robotsResponse.text();
       assert.equal(robotsResponse.status, 200);
-      assert.match(await robotsResponse.text(), /Sitemap: .*\/sitemap\.xml/);
+      assert.match(robotsText, /Sitemap: .*\/sitemap\.xml/);
+      assert.match(robotsText, /Disallow: \/admin/);
+      assert.match(robotsText, /Disallow: \/zh/);
 
       const sitemapResponse = await fetch(
         `http://127.0.0.1:${port}/sitemap.xml`
@@ -283,9 +294,7 @@ test(
       const sitemapXml = await sitemapResponse.text();
       assert.equal(sitemapResponse.status, 200);
       for (const path of [
-        '/checkup',
-        '/daily',
-        '/bingo',
+        '/book',
         '/book/download',
         '/sources',
         '/privacy-policy',
@@ -293,6 +302,19 @@ test(
         assert.ok(
           sitemapXml.includes(path),
           `The sitemap should include ${path}.`
+        );
+      }
+      for (const path of [
+        '/quiz',
+        '/bingo',
+        '/national-day',
+        '/pricing',
+        '/blog',
+      ]) {
+        assert.equal(
+          sitemapXml.includes(path),
+          false,
+          `The sitemap should omit ${path}.`
         );
       }
 

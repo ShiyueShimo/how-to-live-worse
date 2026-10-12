@@ -1214,6 +1214,19 @@ select:focus-visible {
   text-align: right;
 }
 
+.site-footer .footer-attribution {
+  max-width: 42rem;
+  margin-left: auto;
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.site-footer .footer-attribution a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 0.12em;
+}
+
 .site-not-found {
   width: min(100% - 48px, 760px);
   min-height: 100vh;

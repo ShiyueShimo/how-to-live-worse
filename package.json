@@ -29,7 +29,7 @@
     "test:atomic:d1": "ATOMIC_D1=1 node --import tsx --test tests/atomic.test.ts",
     "test:atomic:pg": "TSX_TSCONFIG_PATH=tests/tsconfig.pg.json node --import tsx --test tests/atomic.test.ts",
     "test:site": "node --test scripts/site-smoke.test.mjs",
-    "test:content": "tsx --test tests/guide-*.test.ts tests/library.test.ts",
+    "test:content": "tsx --test tests/guide-*.test.ts tests/library.test.ts tests/public-discovery.test.ts",
     "import:guide": "tsx scripts/import-guide.ts",
     "export:guide": "tsx scripts/export-guide.ts",
     "validate:exports": "tsx scripts/validate-guide-exports.ts",

@@ -1,8 +1,9 @@
 import { createFileRoute, Link } from '@tanstack/react-router';
 
 import { envConfigs } from '@/config';
+import { socialHead } from '@/lib/public-discovery';
 import { m } from '@/paraglide/messages.js';
-import { getLocale, locales, localizeUrl } from '@/paraglide/runtime.js';
+import { getLocale } from '@/paraglide/runtime.js';
 import { GuideShell } from '@/components/guide-shell';
 import { guideManifest } from '@/content/guide/data';
 
@@ -205,28 +206,15 @@ function HomePage() {
 export const Route = createFileRoute('/')({
   head: () => {
     const locale = getLocale();
-    const canonical = (targetLocale: (typeof locales)[number]) =>
-      localizeUrl(`${envConfigs.app_url.replace(/\/$/, '')}/`, {
-        locale: targetLocale,
-      }).href;
-    return {
-      meta: [
-        { title: m['common.metadata.title']({}, { locale }) },
-        {
-          name: 'description',
-          content: m['common.metadata.description']({}, { locale }),
-        },
-      ],
-      links: [
-        { rel: 'canonical', href: canonical(locale) },
-        ...locales.map((targetLocale) => ({
-          rel: 'alternate',
-          hrefLang: targetLocale,
-          href: canonical(targetLocale),
-        })),
-        { rel: 'alternate', hrefLang: 'x-default', href: canonical('en') },
-      ],
-    };
+    const origin =
+      (typeof window !== 'undefined' && window.location?.origin) ||
+      envConfigs.app_url;
+    return socialHead({
+      origin,
+      title: m['common.metadata.title']({}, { locale }),
+      description: m['common.metadata.description']({}, { locale }),
+      path: '/',
+    });
   },
   component: HomePage,
 });

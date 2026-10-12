@@ -1,11 +1,12 @@
 import { createFileRoute, Link } from '@tanstack/react-router';
 
+import { PROJECT_GITHUB_ISSUES_URL } from '@/lib/public-discovery';
 import { GuideInfoPage, InfoSection } from '@/components/guide-info-page';
 
 function TermsPage() {
   return (
     <GuideInfoPage
-      eyebrow="TERMS · LAST REVIEWED 9 OCTOBER 2026"
+      eyebrow="TERMS · LAST REVIEWED 12 OCTOBER 2026"
       title="A reading project, not a life score."
       intro="Using this site means reading an independent work of satire and educational material. The joke is optional; the source facts and their limits are meant to remain clear."
     >
@@ -37,10 +38,10 @@ function TermsPage() {
       <InfoSection title="Availability and corrections">
         <p>
           This independent project is provided as-is and may change. Source
-          editions are pinned where possible; report corrections through the
-          project’s configured contact channel when one is available. Review the{' '}
-          <Link to="/privacy-policy">privacy page</Link> for local storage
-          details.
+          editions are pinned where possible. Report corrections through{' '}
+          <a href={PROJECT_GITHUB_ISSUES_URL}>the public GitHub issues</a>.
+          Review the <Link to="/privacy-policy">privacy page</Link> for local
+          storage details.
         </p>
       </InfoSection>
     </GuideInfoPage>
